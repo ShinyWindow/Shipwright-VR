@@ -7,11 +7,12 @@
 #include <vector>
 #include <vr_interface.h>
 
-extern "C" {
 #include "z64.h"
 #include "variables.h"
 #include "functions.h"
 #include "macros.h"
+
+extern "C" {
 extern PlayState* gPlayState;
 }
 

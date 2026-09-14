@@ -1,7 +1,8 @@
-extern "C" {
 #include "z64.h"
 #include "macros.h"
 #include "functions.h"
+
+extern "C" {
 extern PlayState* gPlayState;
 extern SaveContext gSaveContext;
 }

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <vr_interface.h>
 #include <fast/vr_openxr.h>
 
@@ -434,11 +435,10 @@ static void VrPhysLogControl(WidgetInfo& info) {
             const char* path = "vr_phys_log.csv";
             const int32_t n = VR_PhysLogWrite(path);
             if (n > 0) {
-                char abs[MAX_PATH] = "";
-                if (_fullpath(abs, path, sizeof(abs)) == nullptr) {
-                    snprintf(abs, sizeof(abs), "%s", path);
-                }
-                snprintf(sStatus, sizeof(sStatus), "Wrote %d samples to:\n%s", n, abs);
+                std::error_code ec;
+                const auto absPath = std::filesystem::absolute(path, ec);
+                const std::string displayPath = ec ? path : absPath.string();
+                snprintf(sStatus, sizeof(sStatus), "Wrote %d samples to:\n%s", n, displayPath.c_str());
             } else if (n == 0) {
                 snprintf(sStatus, sizeof(sStatus), "Nothing captured (was the sword in hand, "
                                                    "with Physical Combat + blade inertia on?)");

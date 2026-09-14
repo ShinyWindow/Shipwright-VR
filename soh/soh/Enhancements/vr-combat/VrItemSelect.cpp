@@ -1,8 +1,9 @@
-extern "C" {
 #include "z64.h"
 #include "macros.h"
 #include "functions.h"
 #include "variables.h" // gItemIcons, gMtxClear
+
+extern "C" {
 extern PlayState* gPlayState;
 // All live in z_player.c with no header declaration of their own.
 void Player_UseItem(PlayState* play, Player* player, s32 item);
