@@ -161,6 +161,53 @@ bool VrArchery_PinchConsumed(int32_t vrHand, uint16_t vrBtnMask);
 bool VrArchery_AimSegment(float* outPosDir6);
 void VrArchery_Reset(void);
 
+// Physical bottle scooping (VrBottle.cpp — selector mode): an EMPTY bottle catches by
+// moving its MOUTH (bottle-hand controller + grip-local offset) into a catchable's volume — no
+// swing, no button. Covers: empty bottle passively selected in normal play (gVrPhysBottleScoop
+// toggles; swimming/horse/minigames excluded). InReach: coarse mouth proximity for the actors'
+// own "bother offering?" gates. MouthInVolume: the offer geometry Actor_OfferGetItem uses for
+// GI_MAX offers while covering (segment since last tick vs. the actor's catch volume). OnCatch:
+// commit haptic. Player_VrTryBottleCatch (z_player.c): resolves a mouth-measured offer through
+// the vanilla catch action from the use-item action handler; 1 = an action was set up.
+// Tick (from Player_UpdateItems): the pour gesture — bottle inverted past gVrBottleInvertDeg,
+// three downward strokes of the mouth of at least gVrBottleShakeAmplitude (haptic per shake),
+// the third empties the bottle on the spot through Player_VrBottlePourOut (z_player.c):
+// fish/bug/blue fire/fairy spawn at the mouth immediately, held state settled, no animation.
+// 1 = contents left the bottle. Also the drink gesture — the mouth held within
+// gVrBottleDrinkDistance of the face (headset eye point, gVrBottleDrinkFaceDown below it):
+// a sip haptic on arrival and every gVrBottleSipInterval seconds after, the third sip swallows
+// through Player_VrBottleDrink (z_player.c): potion / milk / poe effect applied on the spot, the
+// bottle emptied (full milk -> half), no animation. 1 = contents were drunk. GetDebug: live
+// gesture state for the settings menu readout.
+bool VrBottle_Covers(struct Player* player);
+void VrBottle_Tick(struct PlayState* play, struct Player* player);
+int32_t Player_VrBottlePourOut(struct PlayState* play, struct Player* player, const float* mouth);
+int32_t Player_VrBottleDrink(struct PlayState* play, struct Player* player);
+typedef struct VrBottleDebug {
+    int32_t gate; // 0 = a gesture is armed; 1 both gestures switched off; 2 no bottle in normal
+                  // play; 3 contents neither pour nor drink; 4 paused / Link busy / item change
+                  // pending; 5 bottle hand untracked; 6 the contents' gesture is switched off
+    int32_t kind;           // which gesture the contents belong to: 0 pour, 1 drink
+    int32_t inverted;       // the game currently agrees the bottle is upside down
+    float axisY;            // bottle base->mouth axis, world Y component (+1 mouth up, -1 mouth down)
+    float invertThreshold;  // axisY must be below this to count as upside down
+    int32_t shakeCount;     // valid shakes so far (0..2; the third pours and resets)
+    float strokeCm;         // the current downward stroke's descent so far
+    float lastStrokeCm;     // descent of the last stroke that counted as a shake
+    int32_t lastPourResult; // -1 none yet, 0 Player_VrBottlePourOut refused, 1 poured
+    int32_t atFace;         // the mouth is currently within the drink distance of the face
+    float faceCm;           // mouth -> face point distance
+    float drinkDistanceCm;  // must be below this to count as at the face
+    int32_t sipCount;       // sips so far (0..2; the third swallows and resets)
+    int32_t lastDrinkResult; // -1 none yet, 0 Player_VrBottleDrink refused, 1 drunk
+} VrBottleDebug;
+void VrBottle_GetDebug(VrBottleDebug* out);
+bool VrBottle_InReach(struct Actor* actor);
+bool VrBottle_MouthInVolume(struct Actor* actor);
+void VrBottle_OnCatch(void);
+void VrBottle_Reset(void);
+int32_t Player_VrTryBottleCatch(struct PlayState* play, struct Player* player);
+
 // Projectile fire (VR first person, independent of physical combat): the walk-while-aiming
 // path only fires on the vanilla item-button RELEASE, so the aim hand's trigger is wired in
 // as the natural VR fire. FirePressed: rising edge of that trigger this tick (checked in the

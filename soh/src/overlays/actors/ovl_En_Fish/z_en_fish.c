@@ -9,6 +9,7 @@
 #include "vt.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS 0
 
@@ -171,6 +172,12 @@ s32 EnFish_InBottleRange(EnFish* this, PlayState* play) {
     s32 pad;
     Player* player = GET_PLAYER(play);
     Vec3f sp1C;
+
+    // SOH [VR] Physical scoop: the bottle mouth near the fish is reach enough (the offer
+    // itself is then measured at the mouth in Actor_OfferGetItem).
+    if (VrBottle_InReach(&this->actor)) {
+        return true;
+    }
 
     if (this->actor.xzDistToPlayer < 32.0f) {
         sp1C.x = (Math_SinS(this->actor.yawTowardsPlayer + 0x8000) * 16.0f) + player->actor.world.pos.x;

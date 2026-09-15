@@ -2705,6 +2705,9 @@ void Player_UpdateItems(Player* this, PlayState* play) {
     }
     // SOH [VR] Grip preparation/release is separate from item-button activation.
     VrItemThrow_Tick(play, this);
+    // SOH [VR] Bottle pour gesture (inverted + three shakes) commits contents through the
+    // item button's own use path from this same boundary.
+    VrBottle_Tick(play, this);
     if ((this->actor.category == ACTORCAT_PLAYER) &&
         (CVarGetInteger(CVAR_ENHANCEMENT("QuickPutaway"), 0) ||
          !(this->stateFlags1 & PLAYER_STATE1_START_CHANGING_HELD_ITEM)) &&
@@ -7002,6 +7005,11 @@ static BottleSwingInfo sBottleSwingInfo[] = {
 };
 
 s32 func_8083C6B8(PlayState* play, Player* this) {
+    // SOH [VR] Physical scoop: the bottle mouth reached a catchable (the offer was measured at
+    // the mouth in Actor_OfferGetItem). Commits with no button press and no swing window.
+    if (Player_VrTryBottleCatch(play, this)) {
+        return 1;
+    }
     if (sUseHeldItem) {
         if (Player_GetBottleHeld(this) >= 0) {
             Player_SetupAction(play, this, Player_Action_SwingBottle, 0);
@@ -15115,6 +15123,50 @@ void Player_Action_SwingBottle(Player* this, PlayState* play) {
     }
 }
 
+// SOH [VR] Physical scoop commitment point. While VrBottle covers, Actor_OfferGetItem measures
+// GI_MAX offers at the bottle mouth, so a table-matching interactRangeActor means the mouth
+// passed through that actor's catch volume last frame. Resolves ON THE SPOT with the vanilla
+// catch's own pieces — same table, same parent handshake, same Player_UpdateBottleHeld, same
+// textbox and fanfare — but with no action change: no catch animation, no cutscene state, no
+// turn-around camera (user decision: hear the jingle, read what you got, keep moving). The
+// item-button disable that every textbox triggers must not put the bottle away meanwhile; the
+// selector's VB_PUTAWAY_BECAUSE_DISABLED_ITEM_BUTTONS hook guards that. Called from the
+// use-item action handler (the seam vanilla's own swing starts from). 1 = a catch resolved.
+int32_t Player_VrTryBottleCatch(PlayState* play, Player* this) {
+    Actor* target = this->interactRangeActor;
+    BottleCatchInfo* catchInfo = &sBottleCatchInfo[0];
+    s32 i;
+
+    if (target == NULL || !VrBottle_Covers(this) || this->heldItemAction != this->itemAction ||
+        play->msgCtx.msgMode != MSGMODE_NONE ||
+        (this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE))) {
+        return 0;
+    }
+    for (i = 0; i < ARRAY_COUNT(sBottleCatchInfo); i++, catchInfo++) {
+        if (target->id == catchInfo->actorId) {
+            break;
+        }
+    }
+    // Same veto seam as the vanilla swing; a forced "yes" for an actor outside the table still
+    // has no entry to resolve with, so it stays refused here.
+    if (i >= ARRAY_COUNT(sBottleCatchInfo) || !GameInteractor_Should(VB_BOTTLE_ACTOR, true, target)) {
+        return 0;
+    }
+
+    target->parent = &this->actor;
+    Player_UpdateBottleHeld(play, this, catchInfo->itemId, ABS(catchInfo->itemAction));
+    if (this->actor.yDistToWater > 12.0f) {
+        Player_PlaySfx(this, NA_SE_IT_SCOOP_UP_WATER);
+    }
+    if (!CVarGetInteger(CVAR_ENHANCEMENT("FastBottles"), 0)) {
+        Message_StartTextbox(play, catchInfo->textId, &this->actor);
+    }
+    Audio_PlayFanfare(NA_BGM_ITEM_GET | 0x900);
+    GameInteractor_ExecuteOnPlayerBottleUpdate(catchInfo->itemId);
+    VrBottle_OnCatch();
+    return 1;
+}
+
 static Vec3f D_80854A1C = { 0.0f, 0.0f, 5.0f };
 
 void Player_Action_8084EED8(Player* this, PlayState* play) {
@@ -15169,6 +15221,112 @@ void Player_Action_8084EFC0(Player* this, PlayState* play) {
     }
 
     Player_ProcessAnimSfxList(this, D_80854A34);
+}
+
+// SOH [VR] Immediate pour-out: the third shake IS the emptying. Spawns exactly what the vanilla
+// drop / fairy-release actions spawn at their key frames (D_80854A28 table, FAIRY_REVIVE_BOTTLE
+// + full heal), but at the bottle MOUTH and right now — no body animation, no cutscene state,
+// no turn-around camera. The held state is settled directly (id + action + inventory) instead of
+// leaving the vanilla held/inventory mismatch that the button resync would later animate away.
+// 1 = contents left the bottle.
+int32_t Player_VrBottlePourOut(PlayState* play, Player* this, const float* mouth) {
+    static Vec3f sVrNoOffset = { 0.0f, 0.0f, 0.0f };
+    Vec3f at;
+
+    if (mouth == NULL || this->heldItemAction != this->itemAction || this->unk_6AD != 0 ||
+        (this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE))) {
+        return 0;
+    }
+    at.x = mouth[0];
+    at.y = mouth[1];
+    at.z = mouth[2];
+
+    if (this->heldItemAction == PLAYER_IA_BOTTLE_FAIRY) {
+        Player_SpawnFairy(play, this, &at, &sVrNoOffset, FAIRY_REVIVE_BOTTLE);
+        Player_PlaySfx(this, NA_SE_EV_BOTTLE_CAP_OPEN);
+        Player_PlaySfx(this, NA_SE_EV_FIATY_HEAL - SFX_FLAG);
+        gSaveContext.healthAccumulator = MAX_HEALTH;
+    } else if ((this->heldItemAction >= PLAYER_IA_BOTTLE_FISH) && (this->heldItemAction <= PLAYER_IA_BOTTLE_BUG)) {
+        BottleDropInfo* dropInfo = &D_80854A28[this->heldItemAction - PLAYER_IA_BOTTLE_FISH];
+
+        GameInteractor_Should(VB_EMPTYING_BOTTLE, true, this);
+        Actor_Spawn(&play->actorCtx, play, dropInfo->actorId, at.x, at.y, at.z, 0x4000, this->actor.shape.rot.y, 0,
+                    dropInfo->actorParams);
+        Player_PlaySfx(this, NA_SE_EV_BOTTLE_CAP_OPEN);
+    } else {
+        return 0; // drinks and show-items never pour
+    }
+
+    Player_UpdateBottleHeld(play, this, ITEM_BOTTLE, PLAYER_IA_BOTTLE);
+    this->heldItemId = ITEM_BOTTLE;
+    this->heldItemAction = PLAYER_IA_BOTTLE;
+    return 1;
+}
+
+// SOH [VR] Immediate drink: the third sip at the face IS the swallow. Applies exactly what the
+// vanilla drink action applies at its key frame (Player_Action_8084EAC0, actionVar2 == 0): the
+// potion / milk effect table (heal, magic, five hearts) or the poe's gamble, then the same
+// Player_UpdateBottleHeld(ITEM_BOTTLE) the action performs when the refill finishes — which is
+// where full milk becomes half milk (Inventory_UpdateBottleItem). No body animation, no
+// cutscene state, no camera, and Link is never frozen for the refill; the hearts/magic just
+// fill while play continues. The held state is settled directly from the button (so a half
+// milk bottle is what stays in hand). 1 = contents were drunk.
+int32_t Player_VrBottleDrink(PlayState* play, Player* this) {
+    // Same bits as the vanilla table D_808549FC (red potion, blue potion, green potion, full
+    // milk, half milk): 1 = full heal, 2 = full magic, 4 = five hearts.
+    static const u8 sVrDrinkEffects[] = { 0x01, 0x03, 0x02, 0x04, 0x04 };
+    s32 item;
+
+    if (this->heldItemAction != this->itemAction || this->unk_6AD != 0 ||
+        (this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE))) {
+        return 0;
+    }
+
+    if (this->heldItemAction == PLAYER_IA_BOTTLE_POE) {
+        s32 rand = Rand_S16Offset(-1, 3);
+
+        if (rand == 0) {
+            rand = 3;
+        }
+        if ((rand < 0) && (gSaveContext.health <= FULL_HEART_HEALTH)) {
+            rand = 3;
+        }
+        if (rand < 0) {
+            Health_ChangeBy(play, -FULL_HEART_HEALTH);
+        } else {
+            gSaveContext.healthAccumulator = rand * FULL_HEART_HEALTH;
+        }
+    } else if ((this->heldItemAction >= PLAYER_IA_BOTTLE_POTION_RED) &&
+               (this->heldItemAction <= PLAYER_IA_BOTTLE_MILK_HALF)) {
+        s32 effect = sVrDrinkEffects[this->heldItemAction - PLAYER_IA_BOTTLE_POTION_RED];
+
+        if (effect & 1) {
+            gSaveContext.healthAccumulator = MAX_HEALTH;
+        }
+        if (effect & 2) {
+            Magic_Fill(play);
+        }
+        if (effect & 4) {
+            gSaveContext.healthAccumulator = 0x50;
+        }
+    } else {
+        return 0; // pourables and show-items are never drunk
+    }
+
+    Player_PlayVoiceSfx(this, LINK_IS_ADULT ? NA_SE_VO_LI_BREATH_DRINK : NA_SE_VO_LI_BREATH_DRINK_KID);
+    Player_UpdateBottleHeld(play, this, ITEM_BOTTLE, PLAYER_IA_BOTTLE);
+    // Inventory_UpdateBottleItem may have left HALF milk on the button rather than an empty
+    // bottle: hold whatever the button now says, with matching action state, so the selector's
+    // "settled" test (held == item action) is true on the very next tick.
+    item = gSaveContext.equips.buttonItems[this->heldItemButton];
+    if (item >= ITEM_BOTTLE && item <= ITEM_POE) { // every bottle item id, ITEM_BOTTLE .. ITEM_POE
+        this->heldItemId = item;
+        this->heldItemAction = this->itemAction = Player_ItemToItemAction(item);
+    } else {
+        this->heldItemId = ITEM_BOTTLE;
+        this->heldItemAction = this->itemAction = PLAYER_IA_BOTTLE;
+    }
+    return 1;
 }
 
 static AnimSfxEntry D_80854A3C[] = {

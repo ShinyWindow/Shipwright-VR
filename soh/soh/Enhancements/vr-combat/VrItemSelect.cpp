@@ -88,6 +88,8 @@ int sRestoreItem = -1;
 // Selector mode last tick — the falling edge (third person, flat screen, F9) clears Link's
 // hands per the behavior plan; the selection fiction belongs to VR first person.
 bool sModeWasInPlay = false;
+// >0 while a textbox is up and for a few ticks after it closes (see the put-away guard).
+int sTextboxRecentTicks = 0;
 
 int SwordHand() {
     return CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT;
@@ -256,6 +258,11 @@ void ItemSelectTick() {
         return;
     }
     sModeWasInPlay = true;
+    if (gPlayState != NULL && gPlayState->msgCtx.msgMode != MSGMODE_NONE) {
+        sTextboxRecentTicks = 6;
+    } else if (sTextboxRecentTicks > 0) {
+        sTextboxRecentTicks--;
+    }
     // Dying resets to empty hands (behavior plan): nothing survives to the respawn — not the
     // tracked loadout, not an armed door-restore, not a pending request.
     if (gPlayState != NULL && GameInteractor::IsSaveLoaded(true)) {
@@ -625,6 +632,7 @@ extern "C" void VrItemSelect_Reset(void) {
     VrItemSelect_FinishRequest();
     VrItemThrow_Reset();
     VrArchery_Reset();
+    VrBottle_Reset();
     CloseSelector();
     // Transient by design: a reset (save-state load, exit game, mode off) belongs to a state
     // where neither the pending restore nor the tracked loadout is trustworthy anymore.
@@ -650,6 +658,9 @@ extern "C" uint16_t VrItemSelect_TriggerItemMask(int32_t vrHand) {
     }
     if (VrArchery_Covers(player)) {
         return 0; // the string-hand pinch owns nock/draw/fire (VrArchery_ItemButtonMask)
+    }
+    if (VrBottle_Covers(player)) {
+        return 0; // the bottle mouth scoops; the trigger swing would only replay the vanilla window
     }
     // Physical combat owns the weapons it covers: the swing IS the attack, so the sword hand's
     // trigger stays idle rather than also emitting B. Weapons physical combat does NOT cover
@@ -691,6 +702,16 @@ static void RegisterVrItemSelect() {
     // Rule 1 (see the file header): in selector mode no button may CHANGE what's in Link's hands
     // — that is the selector's job. A press for the item ALREADY held passes through untouched,
     // which is exactly what the trigger mirror emits, so use/fire keeps the full vanilla path.
+    // Every textbox disables the item buttons for its duration (z_parameter.c), and vanilla puts
+    // away a held item whose button is disabled. That rule exists for restricted states, but a
+    // textbox is not one: in selector mode a caught fish's "You caught a fish!" text (or any
+    // other message) must not strip the bottle from Link's hand. Guarded while a message is up
+    // and for a few ticks after it closes (the button re-enable lags the close by a frame or two).
+    COND_VB_SHOULD(VB_PUTAWAY_BECAUSE_DISABLED_ITEM_BUTTONS, CVarGetInteger("gVrItemSelect", 1), {
+        if (SelectorModeInPlay() && sTextboxRecentTicks > 0) {
+            *should = false;
+        }
+    });
     COND_VB_SHOULD(VB_CHANGE_HELD_ITEM_AND_USE_ITEM, CVarGetInteger("gVrItemSelect", 1), {
         int32_t item = va_arg(args, int32_t);
         Player* player = (gPlayState != NULL) ? GET_PLAYER(gPlayState) : NULL;

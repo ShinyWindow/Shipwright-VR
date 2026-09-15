@@ -9,6 +9,7 @@
 #include "objects/gameplay_keep/gameplay_keep.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/savestate_serialize.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS 0
 
@@ -106,6 +107,12 @@ s32 EnInsect_InBottleRange(EnInsect* this, PlayState* play) {
     s32 pad;
     Player* player = GET_PLAYER(play);
     Vec3f pos;
+
+    // SOH [VR] Physical scoop: the bottle mouth near the bug is reach enough (the offer
+    // itself is then measured at the mouth in Actor_OfferGetItem).
+    if (VrBottle_InReach(&this->actor)) {
+        return true;
+    }
 
     if (this->actor.xzDistToPlayer < 32.0f) {
         pos.x = Math_SinS(this->actor.yawTowardsPlayer + 0x8000) * 16.0f + player->actor.world.pos.x;
@@ -784,7 +791,8 @@ void EnInsect_Update(Actor* thisx, PlayState* play) {
             } else {
                 EnInsect_SetupCaught(this);
             }
-        } else if (this->actor.xzDistToPlayer < 50.0f && this->actionFunc != EnInsect_Caught) {
+        } else if ((this->actor.xzDistToPlayer < 50.0f || VrBottle_InReach(&this->actor)) && // SOH [VR] mouth reach
+                   this->actionFunc != EnInsect_Caught) {
             if (!(this->insectFlags & 0x20) && this->lifeTimer < 180) {
                 CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
             }

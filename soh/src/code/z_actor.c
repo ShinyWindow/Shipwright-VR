@@ -2178,7 +2178,12 @@ s32 Actor_OfferGetItem(Actor* actor, PlayState* play, s32 getItemId, f32 xzRange
         if ((((player->heldActor != NULL) || (actor == player->talkActor)) &&
              ((getItemId > GI_NONE) && (getItemId < GI_MAX))) ||
             (!(player->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_CUTSCENE)))) {
-            if ((actor->xzDistToPlayer < xzRange) && (fabsf(actor->yDistToPlayer) < yRange)) {
+            // SOH [VR] Bottle catch offers (GI_MAX): while the physical scoop covers, the reach
+            // test is the bottle MOUTH entering the catch volume instead of Link's body distance.
+            // Everything else about the offer (state gates, handshake) stays vanilla.
+            s32 vrScoop = (getItemId == GI_MAX) && VrBottle_Covers(player);
+            if (vrScoop ? VrBottle_MouthInVolume(actor)
+                        : ((actor->xzDistToPlayer < xzRange) && (fabsf(actor->yDistToPlayer) < yRange))) {
                 s16 yawDiff = actor->yawTowardsPlayer - player->actor.shape.rot.y;
                 s32 absYawDiff = ABS(yawDiff);
 

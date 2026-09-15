@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <vr_interface.h>
 #include <fast/vr_openxr.h>
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 namespace SohGui {
 
@@ -454,6 +455,46 @@ static void VrPhysLogControl(WidgetInfo& info) {
     } else if (sStatus[0] != '\0') {
         ImGui::TextUnformatted(sStatus);
     }
+}
+
+// Live state of the bottle pour / drink gestures: which gate (if any) is holding them, whether
+// the game agrees the bottle is upside down or at the face, and how far the current shake has
+// travelled. Every value is the 20 Hz tick's; the menu just re-reads it each frame. This is the
+// in-headset answer to "I'm shaking / sipping and nothing happens": one of these lines will say why.
+static void VrBottlePourReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    static const char* sGate[] = {
+        "ARMED",
+        "off (Physical Bottle Pouring and Drinking both unchecked)",
+        "no bottle in hand / not in normal play",
+        "contents neither pour (fish, bug, blue fire, fairy) nor drink (potions, milk, poe)",
+        "paused, Link busy, or item change pending",
+        "bottle hand not tracked",
+        "off (this content's gesture is unchecked)",
+    };
+    VrBottleDebug d;
+    VrBottle_GetDebug(&d);
+    const int gate = (d.gate >= 0 && d.gate < 7) ? d.gate : 0;
+    ImGui::Text("%s gesture: %s", d.kind ? "Drink" : "Pour", sGate[gate]);
+    if (gate == 0 && !d.kind) {
+        ImGui::Text("Upside down: %s   (axis %+.2f, must be below %+.2f)", d.inverted ? "YES" : "no", d.axisY,
+                    d.invertThreshold);
+        ImGui::Text("Shakes: %d / 3   this stroke %.1f cm   last shake %.1f cm", d.shakeCount, d.strokeCm,
+                    d.lastStrokeCm);
+    } else if (gate == 0) {
+        ImGui::Text("At face: %s   (mouth is %.1f cm from the face, must be under %.1f)", d.atFace ? "YES" : "no",
+                    d.faceCm, d.drinkDistanceCm);
+        ImGui::Text("Sips: %d / 3", d.sipCount);
+    }
+    ImGui::Text("Last pour: %s", d.lastPourResult < 0 ? "none yet"
+                                 : d.lastPourResult   ? "poured"
+                                                      : "REFUSED (Link busy: cutscene, carrying, item cs)");
+    ImGui::Text("Last drink: %s", d.lastDrinkResult < 0 ? "none yet"
+                                  : d.lastDrinkResult   ? "drunk"
+                                                        : "REFUSED (Link busy: cutscene, carrying, item cs)");
 }
 
 void SohMenu::AddMenuVRSettings() {
@@ -1635,6 +1676,155 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Calibrates how far the string visual stretches to reach your "
                               "pulling hand (model units at full scale). If the drawn string "
                               "overshoots your hand, raise this; if it falls short, lower it."));
+    AddWidget(devPath, "Bottle", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Bottle Scooping", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysBottleScoop")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("With an empty bottle in hand, move its mouth into a fairy, fish, bug "
+                              "or blue fire to catch it - no swing, no button. The bottle-hand "
+                              "trigger no longer swings. Disable for the classic scheme (trigger "
+                              "swings, catch during the animation). Drinking and pouring are "
+                              "unchanged either way."));
+    AddWidget(devPath, "Show Bottle Mouth Marker", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBottleShowMouth")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Draws a tiny Deku Nut at the point the game treats as the bottle "
+                              "mouth, for lining up the offset sliders below. It grows when a "
+                              "catchable is within reach. Turn off once tuned."));
+    AddWidget(devPath, "Bottle Mouth Right: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleMouthRight")
+        .Options(FloatSliderOptions()
+                     .Min(-40.0f)
+                     .Max(40.0f)
+                     .DefaultValue(-6.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Moves the bottle mouth sideways in the bottle hand's own frame so "
+                              "the marker sits on the visible bottle's opening. Mirrored for "
+                              "left-handed mode."));
+    AddWidget(devPath, "Bottle Mouth Up: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleMouthUp")
+        .Options(FloatSliderOptions()
+                     .Min(-40.0f)
+                     .Max(40.0f)
+                     .DefaultValue(-18.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Moves the bottle mouth along the bottle hand's up axis."));
+    AddWidget(devPath, "Bottle Mouth Forward: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleMouthFwd")
+        .Options(FloatSliderOptions()
+                     .Min(-40.0f)
+                     .Max(40.0f)
+                     .DefaultValue(9.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Moves the bottle mouth along the bottle hand's pointing direction "
+                              "(negative = toward you)."));
+    AddWidget(devPath, "Bottle Catch Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleCatchRadius")
+        .Options(FloatSliderOptions()
+                     .Min(5.0f)
+                     .Max(40.0f)
+                     .DefaultValue(20.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close the bottle mouth must pass to a fairy, fish or bug to "
+                              "catch it (blue fire uses its flame column plus this padding). "
+                              "Larger is more forgiving."));
+    AddWidget(devPath, "Bottle Marker Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleIconScale")
+        .Options(FloatSliderOptions()
+                     .Min(3.0f)
+                     .Max(100.0f)
+                     .DefaultValue(12.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the bottle mouth marker as a percent of a normal nut drop."));
+    AddWidget(devPath, "Physical Bottle Pouring", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysBottlePour")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Hold a bottle upside down and shake it three times to let out a "
+                              "fish, bug, blue fire or fairy. Each valid shake buzzes the hand; "
+                              "the third empties the bottle through the normal use action. "
+                              "Potions and milk are drunk, not poured. The trigger still works "
+                              "for contents either way."));
+    AddWidget(devPath, "Bottle Upside-Down Angle: %.0f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleInvertDeg")
+        .Options(FloatSliderOptions()
+                     .Min(20.0f)
+                     .Max(80.0f)
+                     .DefaultValue(50.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How far from straight down the bottle mouth may point and still "
+                              "count as upside down for pouring. Larger is more lenient."));
+    AddWidget(devPath, "Bottle Shake Size: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleShakeAmplitude")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(25.0f)
+                     .DefaultValue(6.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How far the bottle mouth must travel downward in one stroke for "
+                              "it to count as a shake. Distance, not speed: slow shakes count. "
+                              "Lower if shakes are missed, raise if the bottle empties from "
+                              "ordinary movement."));
+    AddWidget(devPath, "Bottle Re-catch Delay: %.1f s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleRecatchDelay")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(5.0f)
+                     .DefaultValue(1.5f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("After pouring something out, scooping stays off for this long so "
+                              "the mouth (still right on top of it) can't catch it straight back."));
+    AddWidget(devPath, "Physical Bottle Drinking", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysBottleDrink")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Bring the bottle mouth (the marker) up to your face to drink a "
+                              "potion, milk or poe. The hand buzzes once on arrival and again a "
+                              "moment later; the third buzz is the swallow and the effect lands "
+                              "right then, with no Link animation. Move it away before the third "
+                              "and nothing is spent. The trigger still drinks either way."));
+    AddWidget(devPath, "Bottle Drink Distance: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleDrinkDistance")
+        .Options(FloatSliderOptions()
+                     .Min(3.0f)
+                     .Max(30.0f)
+                     .DefaultValue(10.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close the bottle mouth must come to your face to count as "
+                              "drinking. Small on purpose: raise it if sips are missed, lower it "
+                              "if the bottle drinks itself when you look at it."));
+    AddWidget(devPath, "Bottle Face Point Below Eyes: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleDrinkFaceDown")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(20.0f)
+                     .DefaultValue(8.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Where your mouth is, measured straight down from the headset's "
+                              "eye point. The drink distance is measured from here."));
+    AddWidget(devPath, "Bottle Sip Interval: %.2f s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBottleSipInterval")
+        .Options(FloatSliderOptions()
+                     .Min(0.15f)
+                     .Max(1.5f)
+                     .DefaultValue(0.45f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("Time between sip buzzes while the bottle stays at your face. Two "
+                              "of these after the first buzz is the swallow."));
+    AddWidget(devPath, "VrBottlePourReadout", WIDGET_CUSTOM).CustomFunction(VrBottlePourReadout).HideInSearch(true);
     AddWidget(buttonsPath, "Selector Hand", WIDGET_CVAR_COMBOBOX)
         .CVar("gVrItemSelHand")
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrItemSelect", 1); })

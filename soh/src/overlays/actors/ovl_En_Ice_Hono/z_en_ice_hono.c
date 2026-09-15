@@ -6,6 +6,7 @@
 
 #include "z_en_ice_hono.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS 0
 
@@ -188,6 +189,12 @@ void EnIceHono_Destroy(Actor* thisx, PlayState* play) {
 
 u32 EnIceHono_InBottleRange(EnIceHono* this, PlayState* play) {
     Player* player = GET_PLAYER(play);
+
+    // SOH [VR] Physical scoop: the bottle mouth near the flame is reach enough (the offer
+    // itself is then measured at the mouth in Actor_OfferGetItem).
+    if (VrBottle_InReach(&this->actor)) {
+        return true;
+    }
 
     if (this->actor.xzDistToPlayer < 60.0f) {
         Vec3f tempPos;
