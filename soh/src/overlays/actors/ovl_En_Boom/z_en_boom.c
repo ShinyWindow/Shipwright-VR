@@ -96,14 +96,77 @@ void EnBoom_Init(Actor* thisx, PlayState* play) {
     Collider_InitQuad(play, &this->collider);
     Collider_SetQuad(play, &this->collider, &this->actor, &sQuadInit);
 
+    // SOH [VR] A vanilla throw until Player_VrThrowBoomerang says otherwise.
+    this->vrPhysical = false;
+    this->vrHomeValid = false;
+    this->vrCatchArmed = false;
+    this->vrCaught = false;
+    this->vrCatchHand = -1;
+    this->vrReturnTicks = 0;
+    this->vrMinHomeDist = 100000.0f;
+    this->vrArriveRadius = 0.0f;
+
     EnBoom_SetupAction(this, EnBoom_Fly);
 }
 
 void EnBoom_Destroy(Actor* thisx, PlayState* play) {
     EnBoom* this = (EnBoom*)thisx;
+    Player* player = GET_PLAYER(play);
 
     Effect_Delete(play, this->effectIndex);
     Collider_DestroyQuad(play, &this->collider);
+
+    // SOH [VR] Vanilla never clears player->boomerangActor (written at the throw, only read
+    // while PLAYER_STATE1_BOOMERANG_THROWN), leaving it dangling after every return.
+    if (player != NULL && player->boomerangActor == &this->actor) {
+        player->boomerangActor = NULL;
+    }
+}
+
+// SOH [VR] Vanilla's return-arrival tail, verbatim (see EnBoom_Fly), shared with the VR path.
+void EnBoom_FinishReturn(EnBoom* this, PlayState* play) {
+    Player* player = GET_PLAYER(play);
+    Actor* target = this->grabbed;
+
+    if (target != NULL) {
+        Math_Vec3f_Copy(&target->world.pos, &player->actor.world.pos);
+
+        // If the grabbed actor is EnItem00 (HP/Key etc) set gravity and flags so it falls in front of Link.
+        // Otherwise if it's a Skulltula Token, just set flags so he collides with it to collect it.
+        if (target->id == ACTOR_EN_ITEM00) {
+            target->gravity = -0.9f;
+            target->bgCheckFlags &= ~0x03;
+        } else {
+            target->flags &= ~ACTOR_FLAG_HOOKSHOT_ATTACHED;
+        }
+    }
+    // Set player flags and kill the boomerang beacause Link caught it.
+    player->stateFlags1 &= ~PLAYER_STATE1_BOOMERANG_THROWN;
+    player->boomerangQuickRecall = false;
+    Actor_Kill(&this->actor);
+}
+
+// SOH [VR] Did this tick's travel (prevPos -> world.pos) pass within radius of point? The
+// boomerang covers ~12 units a tick, more than a hand-sized catch radius, so a point test
+// could step straight over the hand.
+static s32 EnBoom_VrSweepHits(EnBoom* this, Vec3f* point, f32 radius) {
+    Vec3f a = this->actor.prevPos;
+    Vec3f b = this->actor.world.pos;
+    f32 dx = b.x - a.x;
+    f32 dy = b.y - a.y;
+    f32 dz = b.z - a.z;
+    f32 lenSq = SQ(dx) + SQ(dy) + SQ(dz);
+    f32 t = 0.0f;
+    Vec3f closest;
+
+    if (lenSq > 0.0001f) {
+        t = ((point->x - a.x) * dx + (point->y - a.y) * dy + (point->z - a.z) * dz) / lenSq;
+        t = CLAMP(t, 0.0f, 1.0f);
+    }
+    closest.x = a.x + dx * t;
+    closest.y = a.y + dy * t;
+    closest.z = a.z + dz * t;
+    return Math_Vec3f_DistXYZ(&closest, point) <= radius;
 }
 
 void EnBoom_Fly(EnBoom* this, PlayState* play) {
@@ -127,13 +190,20 @@ void EnBoom_Fly(EnBoom* this, PlayState* play) {
 
     // If the boomerang is moving toward a targeted actor, handle setting the proper x and y angle to fly toward it.
     if (target != NULL) {
-        yawTarget = Actor_WorldYawTowardPoint(&this->actor, &target->focus.pos);
+        // SOH [VR] On the return leg (moveTo = Link) a physically thrown boomerang homes on the
+        // catch HAND the module fed this tick, not Link's head. Same gain, same stepping.
+        Vec3f* homePos = &target->focus.pos;
+        if (this->vrPhysical && this->vrHomeValid && target == &player->actor) {
+            homePos = &this->vrHomePos;
+        }
+
+        yawTarget = Actor_WorldYawTowardPoint(&this->actor, homePos);
         yawDiff = this->actor.world.rot.y - yawTarget;
 
-        pitchTarget = Actor_WorldPitchTowardPoint(&this->actor, &target->focus.pos);
+        pitchTarget = Actor_WorldPitchTowardPoint(&this->actor, homePos);
         pitchDiff = this->actor.world.rot.x - pitchTarget;
 
-        distXYZScale = (200.0f - Math_Vec3f_DistXYZ(&this->actor.world.pos, &target->focus.pos)) * 0.005f;
+        distXYZScale = (200.0f - Math_Vec3f_DistXYZ(&this->actor.world.pos, homePos)) * 0.005f;
         if (distXYZScale < 0.12f) {
             distXYZScale = 0.12f;
         }
@@ -169,28 +239,39 @@ void EnBoom_Fly(EnBoom* this, PlayState* play) {
     // Decrement the return timer and check if it's 0. If it is, check if Link can catch it and handle accordingly.
     // Otherwise handle grabbing and colliding.
     if (DECR(this->returnTimer) == 0 || player->boomerangQuickRecall) {
-        distFromLink = Math_Vec3f_DistXYZ(&this->actor.world.pos, &player->actor.focus.pos);
         this->moveTo = &player->actor;
 
-        // If the boomerang is less than 40 units away from Link, he can catch it.
-        if (distFromLink < 40.0f || player->boomerangQuickRecall) {
-            target = this->grabbed;
-            if (target != NULL) {
-                Math_Vec3f_Copy(&target->world.pos, &player->actor.world.pos);
+        if (this->vrPhysical && this->vrHomeValid) {
+            // SOH [VR] Return to the catch hand. Arrival = this tick's travel swept through the
+            // catch sphere around the hand: with the grip closed that is a catch (the module
+            // puts the boomerang in that hand), with it open a miss (vanilla end; the pocket
+            // re-presents it). Quick recall (FastBoomerang) ends it on the spot as vanilla.
+            // Safety nets so a hand that keeps dodging can't leave it circling: once it has
+            // come near and is now clearly receding it counts as missed, and so does a return
+            // leg longer than 8 s.
+            s32 swept = EnBoom_VrSweepHits(this, &this->vrHomePos, this->vrArriveRadius);
+            f32 distFromHand = Math_Vec3f_DistXYZ(&this->actor.world.pos, &this->vrHomePos);
+            s32 passedBy;
 
-                // If the grabbed actor is EnItem00 (HP/Key etc) set gravity and flags so it falls in front of Link.
-                // Otherwise if it's a Skulltula Token, just set flags so he collides with it to collect it.
-                if (target->id == ACTOR_EN_ITEM00) {
-                    target->gravity = -0.9f;
-                    target->bgCheckFlags &= ~0x03;
-                } else {
-                    target->flags &= ~ACTOR_FLAG_HOOKSHOT_ATTACHED;
-                }
+            if (distFromHand < this->vrMinHomeDist) {
+                this->vrMinHomeDist = distFromHand;
             }
-            // Set player flags and kill the boomerang beacause Link caught it.
-            player->stateFlags1 &= ~PLAYER_STATE1_BOOMERANG_THROWN;
-            player->boomerangQuickRecall = false;
-            Actor_Kill(&this->actor);
+            passedBy = (this->vrMinHomeDist < 60.0f) && (distFromHand > this->vrMinHomeDist + 40.0f);
+            if (this->vrReturnTicks < 0xFFFF) {
+                this->vrReturnTicks++;
+            }
+
+            if (swept || player->boomerangQuickRecall || passedBy || this->vrReturnTicks > 160) {
+                this->vrCaught = swept && this->vrCatchArmed;
+                EnBoom_FinishReturn(this, play);
+            }
+        } else {
+            distFromLink = Math_Vec3f_DistXYZ(&this->actor.world.pos, &player->actor.focus.pos);
+
+            // If the boomerang is less than 40 units away from Link, he can catch it.
+            if (distFromLink < 40.0f || player->boomerangQuickRecall) {
+                EnBoom_FinishReturn(this, play);
+            }
         }
     } else {
         collided = (this->collider.base.atFlags & AT_HIT);
@@ -236,6 +317,9 @@ void EnBoom_Fly(EnBoom* this, PlayState* play) {
             Math_Vec3f_Copy(&target->world.pos, &this->actor.world.pos);
         }
     }
+
+    // SOH [VR] The hand position is good for one tick; the module re-feeds it before the next.
+    this->vrHomeValid = false;
 }
 
 void EnBoom_Update(Actor* thisx, PlayState* play) {

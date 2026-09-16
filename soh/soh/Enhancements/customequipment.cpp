@@ -6,6 +6,7 @@
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/ShipInit.hpp"
 #include "soh/ResourceManagerHelpers.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 extern "C" {
 #include "z64.h"
@@ -286,7 +287,8 @@ static void RegisterCustomEquipment() {
                         customDL = gCustomHammerDL;
                         break;
                     case PLAYER_MODELTYPE_LH_BOOMERANG:
-                        if (!(player->stateFlags1 & PLAYER_STATE1_BOOMERANG_THROWN))
+                        // SOH [VR] Also hidden while the physical boomerang module owns the model.
+                        if (!(player->stateFlags1 & PLAYER_STATE1_BOOMERANG_THROWN) && !VrBoomerang_HidesHandModel())
                             customDL = gCustomBoomerangDL;
                         break;
                 }

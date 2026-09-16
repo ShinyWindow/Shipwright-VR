@@ -7,6 +7,7 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 #include "VrCombat.h"
+#include "VrPocket.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/ShipInit.hpp"
 #include "soh/frame_interpolation.h"
@@ -19,36 +20,21 @@ int sCarryHand = -1;                // hand that grabbed the current throwable, 
 int sObservedItem = -1;
 bool sReleaseHasGrip = false;
 
-// Bombchu grab transform. The presented chu is a real model with an orientation; grabbing it
-// records where it sat relative to the hand (position offset and its three model axes, all in
-// the controller's own frame). The carry replays that transform every tick, so the chu is
-// parented to the hand exactly as it was taken, and the angle you let go at is the angle it
-// leaves at. Invalid = a hold restored without an observed grab (save state): the chu then
-// sits at the hand in the default pose.
-bool sGrabValid = false;
-float sGrabOffsetLocal[3];
-float sGrabLeftLocal[3];
-float sGrabUpLocal[3];
-float sGrabForwardLocal[3];
+// Bombchu grab transform (VrPocket::Grab). The presented chu is a real model with an
+// orientation; grabbing it records where it sat relative to the hand (position offset and its
+// three model axes, all in the controller's own frame). The carry replays that transform every
+// tick, so the chu is parented to the hand exactly as it was taken, and the angle you let go at
+// is the angle it leaves at. Invalid = a hold restored without an observed grab (save state):
+// the chu then sits at the hand in the default pose.
+VrPocket::Grab sChuGrab;
 int sPreviewInterpKey; // address only: frame-interpolation identity for the preview draw
 
 float WorldScale() {
-    const float scale = VR_GetWorldScale();
-    return scale < 1.0f ? 35.0f : scale;
+    return VrPocket::WorldScale();
 }
 
 int SwordHandIdx() {
     return CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT;
-}
-
-// Rotate v by unit quaternion q (x, y, z, w). Same helper as VrBottle.cpp.
-void QuatRot(const float q[4], const float v[3], float out[3]) {
-    const float tx = 2.0f * (q[1] * v[2] - q[2] * v[1]);
-    const float ty = 2.0f * (q[2] * v[0] - q[0] * v[2]);
-    const float tz = 2.0f * (q[0] * v[1] - q[1] * v[0]);
-    out[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
-    out[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
-    out[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
 }
 
 // The bombchu rides the bomb's present-and-grab path; only its release differs (a drop that
@@ -57,94 +43,19 @@ bool ChuCovered(Player* player) {
     return player->heldItemAction == PLAYER_IA_BOMBCHU && CVarGetInteger("gVrPhysBombchuDrop", 1);
 }
 
-// Inverse rotation: world -> the controller's own frame (conjugate of a unit quaternion).
-void QuatRotInv(const float q[4], const float v[3], float out[3]) {
-    const float conj[4] = { -q[0], -q[1], -q[2], q[3] };
-    QuatRot(conj, v, out);
-}
-
-// The presented chu's pose: level, nose pointing away from the player along the flattened
-// view direction (the same direction the preview point is placed in). Model axes: +X is
-// "left", +Y up, +Z forward (see EnBomChu_StartCrawl: forward = (sin y, 0, cos y),
-// left = (sin(y+90deg), 0, cos(y+90deg)) = (fz, 0, -fx)).
-bool PreviewAxes(float left[3], float up[3], float forward[3]) {
-    float eye[3], camForward[3], camUp[3];
-    VR_GetCameraPose(eye, camForward, camUp);
-    const float length = std::sqrt(camForward[0] * camForward[0] + camForward[2] * camForward[2]);
-    if (length < 0.01f) return false;
-    forward[0] = camForward[0] / length;
-    forward[1] = 0.0f;
-    forward[2] = camForward[2] / length;
-    up[0] = 0.0f;
-    up[1] = 1.0f;
-    up[2] = 0.0f;
-    left[0] = forward[2];
-    left[1] = 0.0f;
-    left[2] = -forward[0];
-    return true;
-}
-
-// Default carried pose when no grab transform exists (restored hold): the chu sits at the hand
-// with model left = controller -X, up = +Y, forward = controller forward (grip-local -Z, the
-// same axis the bottle mouth uses).
-void DefaultCarryLocal(float offset[3], float left[3], float up[3], float forward[3]) {
-    offset[0] = offset[1] = offset[2] = 0.0f;
-    left[0] = -1.0f; left[1] = 0.0f; left[2] = 0.0f;
-    up[0] = 0.0f;    up[1] = 1.0f;   up[2] = 0.0f;
-    forward[0] = 0.0f; forward[1] = 0.0f; forward[2] = -1.0f;
-}
-
 // Record how the presented chu sits relative to the grabbing hand, in the hand's frame.
 void CaptureChuGrab(int hand) {
-    sGrabValid = false;
-    float handPos[3], handRot[4], preview[3];
-    float left[3], up[3], forward[3];
-    if (!VR_GetHandPose(hand, handPos, handRot) || !VrItemThrow_PreviewPosition(preview) ||
-        !PreviewAxes(left, up, forward)) {
+    sChuGrab.Clear();
+    float preview[3], left[3], up[3], forward[3];
+    if (!VrItemThrow_PreviewPosition(preview) || !VrPocket::Axes(left, up, forward)) {
         return;
     }
-    const float offsetWorld[3] = { preview[0] - handPos[0], preview[1] - handPos[1], preview[2] - handPos[2] };
-    QuatRotInv(handRot, offsetWorld, sGrabOffsetLocal);
-    QuatRotInv(handRot, left, sGrabLeftLocal);
-    QuatRotInv(handRot, up, sGrabUpLocal);
-    QuatRotInv(handRot, forward, sGrabForwardLocal);
-    sGrabValid = true;
+    sChuGrab.Capture(hand, preview, left, up, forward);
 }
 
 // The carried chu's world pose this tick: the grab transform replayed on the current hand pose.
 bool CarriedChuPose(int hand, float position[3], float left[3], float up[3], float forward[3]) {
-    float handPos[3], handRot[4];
-    if (!VR_GetHandPose(hand, handPos, handRot)) return false;
-    float offsetLocal[3], leftLocal[3], upLocal[3], forwardLocal[3];
-    if (sGrabValid) {
-        for (int i = 0; i < 3; ++i) {
-            offsetLocal[i] = sGrabOffsetLocal[i];
-            leftLocal[i] = sGrabLeftLocal[i];
-            upLocal[i] = sGrabUpLocal[i];
-            forwardLocal[i] = sGrabForwardLocal[i];
-        }
-    } else {
-        DefaultCarryLocal(offsetLocal, leftLocal, upLocal, forwardLocal);
-    }
-    float offset[3];
-    QuatRot(handRot, offsetLocal, offset);
-    for (int i = 0; i < 3; ++i) position[i] = handPos[i] + offset[i];
-    QuatRot(handRot, leftLocal, left);
-    QuatRot(handRot, upLocal, up);
-    QuatRot(handRot, forwardLocal, forward);
-    return true;
-}
-
-// Axis frame -> shape.rot, decomposed the same way EnBomChu_UpdateFloorPoly turns its axis
-// frame into a rotation, so the visual and the crawl frame agree. Vanilla never writes a
-// carried actor's rotation (only the hookshot's), so the carry is the sole author here.
-void SetRotFromAxes(Vec3s* rot, const float left[3], const float up[3], const float forward[3]) {
-    MtxF mf{};
-    // Columns (xx,yx,zx | xy,yy,zy | xz,yz,zz) = images of model X, Y, Z.
-    mf.xx = left[0];    mf.yx = left[1];    mf.zx = left[2];
-    mf.xy = up[0];      mf.yy = up[1];      mf.zy = up[2];
-    mf.xz = forward[0]; mf.yz = forward[1]; mf.zz = forward[2];
-    Matrix_MtxFToYXZRotS(&mf, rot, 0);
+    return sChuGrab.Replay(hand, position, left, up, forward);
 }
 
 // Bombchu release intent: the chu crawls where its nose was pointing at the moment of release
@@ -182,17 +93,8 @@ bool SwapChord() {
 // presented preview. Shared by the grab tick and the padmgr grip reservation, so a grip press
 // only loses its normal binding when it would actually grab.
 bool HandNearPreview(int hand) {
-    float preview[3], position[3], rotation[4];
-    if (!VrItemThrow_PreviewPosition(preview) || !VR_GetHandPose(hand, position, rotation)) {
-        return false;
-    }
-    float distanceSq = 0.0f;
-    for (int axis = 0; axis < 3; ++axis) {
-        const float d = position[axis] - preview[axis];
-        distanceSq += d * d;
-    }
-    const float reach = WorldScale() * 0.15f;
-    return distanceSq <= reach * reach;
+    float preview[3];
+    return VrItemThrow_PreviewPosition(preview) && VrPocket::HandNear(hand, preview);
 }
 }
 
@@ -210,7 +112,7 @@ extern "C" void VrItemThrow_Reset(void) {
     sCarryHand = -1;
     sObservedItem = -1;
     sReleaseHasGrip = false;
-    sGrabValid = false;
+    sChuGrab.Clear();
 }
 
 // The presented bombchu is a real (shrunken) chu model, not an item icon: the selector's
@@ -229,9 +131,9 @@ extern "C" bool VrItemThrow_PreviewIsModel(void) {
 extern "C" void VrItemThrow_DrawPreview(void) {
     if (!VrItemThrow_PreviewIsModel()) return;
     float position[3], left[3], up[3], forward[3];
-    if (!VrItemThrow_PreviewPosition(position) || !PreviewAxes(left, up, forward)) return;
+    if (!VrItemThrow_PreviewPosition(position) || !VrPocket::Axes(left, up, forward)) return;
     Vec3s rot;
-    SetRotFromAxes(&rot, left, up, forward);
+    VrPocket::SetRotFromAxes(&rot, left, up, forward);
     const float scale = 0.01f * (CVarGetFloat("gVrChuPreviewScale", 50.0f) / 100.0f); // BOMBCHU_SCALE * shrink
 
     OPEN_DISPS(gPlayState->state.gfxCtx);
@@ -259,17 +161,7 @@ extern "C" bool VrItemThrow_PreviewPosition(float* position) {
         !VrItemSelect_SelectionAllowed() || GET_PLAYER(gPlayState)->heldActor) {
         return false;
     }
-    float eye[3], forward[3], up[3];
-    VR_GetCameraPose(eye, forward, up);
-    const float scale = WorldScale();
-    // Stable chest-height presentation in front of the player; looking up/down must
-    // not move the target out of reach. Exact distances remain headset-tunable.
-    float length = std::sqrt(forward[0] * forward[0] + forward[2] * forward[2]);
-    if (length < 0.01f) return false;
-    position[0] = eye[0] + forward[0] / length * scale * 0.4f;
-    position[1] = eye[1] - scale * 0.25f;
-    position[2] = eye[2] + forward[2] / length * scale * 0.4f;
-    return true;
+    return VrPocket::Point(position);
 }
 
 extern "C" bool VrItemThrow_GripConsumed(int32_t hand, uint16_t mask) {
@@ -293,7 +185,7 @@ extern "C" void VrItemThrow_UpdateCarryPose(Player* player) {
         float left[3], up[3], forward[3];
         if (CarriedChuPose(CarryHand(), position, left, up, forward)) {
             player->heldActor->world.pos = { position[0], position[1], position[2] };
-            SetRotFromAxes(&player->heldActor->shape.rot, left, up, forward);
+            VrPocket::SetRotFromAxes(&player->heldActor->shape.rot, left, up, forward);
         }
     } else if (VR_GetHandPose(CarryHand(), position, rotation)) {
         player->heldActor->world.pos = { position[0], position[1], position[2] };
@@ -369,7 +261,7 @@ extern "C" void VrItemThrow_Tick(PlayState* play, Player* player) {
                 // Capture the presented pose before the grab replaces the preview with the actor.
                 CaptureChuGrab(hand);
                 if (!Player_VrGrabItem(play, player)) {
-                    sGrabValid = false;
+                    sChuGrab.Clear();
                     continue;
                 }
                 sCarryHand = hand;

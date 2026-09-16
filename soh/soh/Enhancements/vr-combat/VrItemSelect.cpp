@@ -455,7 +455,8 @@ extern "C" void VrItemSelect_Draw(void) {
             player->heldItemId >= 158 || player->heldActor != NULL ||
             (player->modelGroup != PLAYER_MODELGROUP_DEFAULT &&
              player->heldItemAction != PLAYER_IA_BOMB && player->heldItemAction != PLAYER_IA_BOMBCHU)) return;
-        if (VrItemThrow_PreviewIsModel()) return; // the bombchu preview is a real model, drawn by VrItemThrow
+        // The bombchu preview and the boomerang pocket are real models, drawn by their own modules.
+        if (VrItemThrow_PreviewIsModel() || VrBoomerang_PreviewIsModel()) return;
         float position[3], rotation[4];
         if (!VrItemThrow_PreviewPosition(position) && !VR_GetHandPose(SwordHand(), position, rotation)) return;
         sAnchor = { position[0], position[1], position[2] };
@@ -634,6 +635,7 @@ extern "C" void VrItemSelect_Reset(void) {
     VrItemThrow_Reset();
     VrArchery_Reset();
     VrBottle_Reset();
+    VrBoomerang_Reset();
     CloseSelector();
     // Transient by design: a reset (save-state load, exit game, mode off) belongs to a state
     // where neither the pending restore nor the tracked loadout is trustworthy anymore.
@@ -662,6 +664,9 @@ extern "C" uint16_t VrItemSelect_TriggerItemMask(int32_t vrHand) {
     }
     if (VrBottle_Covers(player)) {
         return 0; // the bottle mouth scoops; the trigger swing would only replay the vanilla window
+    }
+    if (VrBoomerang_Covers(player) && VrBoomerang_TriggerStandsDown()) {
+        return 0; // the pocket / the hand owns the boomerang; the trigger must not start the vanilla aim
     }
     // Physical combat owns the weapons it covers: the swing IS the attack, so the sword hand's
     // trigger stays idle rather than also emitting B. Weapons physical combat does NOT cover

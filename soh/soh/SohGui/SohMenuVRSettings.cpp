@@ -497,6 +497,51 @@ static void VrBottlePourReadout(WidgetInfo& info) {
                                                         : "REFUSED (Link busy: cutscene, carrying, item cs)");
 }
 
+// Live state of the physical boomerang: pocket / hand / flight, which gate (if any) is holding
+// it, the hand speed at the last release against the throw threshold, and on the way back how
+// far it is from the catch hand and whether that hand's grip is closed. The in-headset answer
+// to "I let go and nothing flew" or "it went past my hand".
+static void VrBoomerangReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    static const char* sState[] = { "none", "POCKET", "IN HAND", "IN FLIGHT" };
+    static const char* sGate[] = {
+        "ARMED",
+        "off (Physical Boomerang unchecked)",
+        "boomerang not selected / not in normal play",
+        "paused or Link busy (state kept)",
+        "a boomerang not thrown by the hand is out (vanilla throw / restored flight)",
+        "no pocket point (headset untracked)",
+    };
+    static const char* sHand[] = { "left", "right" };
+    VrBoomerangDebug d;
+    VrBoomerang_GetDebug(&d);
+    const int state = (d.state >= 0 && d.state < 4) ? d.state : 0;
+    const int gate = (d.gate >= 0 && d.gate < 6) ? d.gate : 0;
+    ImGui::Text("Boomerang: %s   (%s)", sState[state], sGate[gate]);
+    if (d.carryHand >= 0 && d.carryHand < 2) {
+        ImGui::Text("In the %s hand — release still: back to the pocket; release moving: throw", sHand[d.carryHand]);
+    }
+    ImGui::Text("Last release: %.2f m/s (throws at %.2f)   %s", d.lastReleaseSpeed, d.throwMinSpeed,
+                d.lastRelease < 0    ? "none yet"
+                : d.lastRelease == 1 ? "THROWN"
+                : d.lastRelease == 2 ? "throw REFUSED (Link busy / already out)"
+                                     : "too slow, back to the pocket");
+    if (state == 3) {
+        ImGui::Text("%s   catch hand: %s   grip closed: %s", d.returnLeg ? "Coming back" : "Outbound",
+                    (d.throwHand >= 0 && d.throwHand < 2) ? sHand[d.throwHand] : "?", d.catchArmed ? "YES" : "no");
+        if (d.handDistanceCm >= 0.0f) {
+            ImGui::Text("Boomerang -> catch hand: %.0f cm (arrives within %.0f)", d.handDistanceCm, d.catchRadiusCm);
+        }
+    }
+    ImGui::Text("Last return: %s", d.lastReturn < 0    ? "none yet"
+                                   : d.lastReturn == 1 ? "CAUGHT in the hand"
+                                   : d.lastReturn == 2 ? "recovered while another item was selected"
+                                                       : "missed, back to the pocket");
+}
+
 void SohMenu::AddMenuVRSettings() {
     AddMenuEntry("VR Settings", CVAR_SETTING("Menu.VRSettingsSidebarSection"));
 
@@ -1614,6 +1659,50 @@ void SohMenu::AddMenuVRSettings() {
                      .Format("%.0f")
                      .Tooltip("Size of the presented bombchu as a percent of a real one. You grab it "
                               "with the orientation it shows; it then rides your hand exactly as taken."));
+    AddWidget(devPath, "Boomerang", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Boomerang", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysBoomerang")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Selecting the boomerang shows a small boomerang in the pocket in front of "
+                              "you. Grab it with grip (either hand), flick and let go to throw it the "
+                              "way your hand moved; it flies, stuns and fetches as in the base game and "
+                              "comes back to your HAND. Close your grip as it arrives to catch it "
+                              "(ready to throw again); leave the hand open and it returns to the "
+                              "pocket. Letting go without moving, switching items or the sword chord "
+                              "never throw it. Disable for the base game's trigger aim-and-throw."));
+    AddWidget(devPath, "Boomerang Pocket Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBoomerangPreviewScale")
+        .Options(FloatSliderOptions()
+                     .Min(10.0f)
+                     .Max(100.0f)
+                     .DefaultValue(50.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the presented boomerang as a percent of the real one. You grab it "
+                              "with the orientation it shows; it then rides your hand exactly as taken."));
+    AddWidget(devPath, "Boomerang Throw Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBoomerangThrowMinSpeed")
+        .Options(FloatSliderOptions()
+                     .Min(0.2f)
+                     .Max(3.0f)
+                     .DefaultValue(1.0f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How fast the hand must be moving when you let go for it to count as a "
+                              "throw. Slower releases put the boomerang back in the pocket."));
+    AddWidget(devPath, "Boomerang Catch Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBoomerangCatchRadius")
+        .Options(FloatSliderOptions()
+                     .Min(5.0f)
+                     .Max(60.0f)
+                     .DefaultValue(20.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close to the catch hand the returning boomerang must pass to arrive. "
+                              "Grip closed at that moment = caught into the hand; grip open = it "
+                              "vanishes and the pocket shows it again."));
+    AddWidget(devPath, "VrBoomerangReadout", WIDGET_CUSTOM).CustomFunction(VrBoomerangReadout).HideInSearch(true);
     AddWidget(devPath, "Slingshot & Bow", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Archery", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysArchery")

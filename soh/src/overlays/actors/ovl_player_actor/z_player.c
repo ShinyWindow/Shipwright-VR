@@ -2706,6 +2706,9 @@ void Player_UpdateItems(Player* this, PlayState* play) {
     }
     // SOH [VR] Grip preparation/release is separate from item-button activation.
     VrItemThrow_Tick(play, this);
+    // SOH [VR] Physical boomerang: pocket / virtual carry / throw / return-to-hand, from the
+    // same boundary (no held actor exists for it, so it is not a VrItemThrow adapter).
+    VrBoomerang_Tick(play, this);
     // SOH [VR] Bottle pour gesture (inverted + three shakes) commits contents through the
     // item button's own use path from this same boundary.
     VrBottle_Tick(play, this);
@@ -3907,6 +3910,55 @@ void Player_VrReleaseItem(PlayState* play, Player* this, const float* velocity) 
     }
     Player_DetachHeldActor(play, this);
     Player_VrRestorePassiveSelection(this, action, item);
+}
+
+// SOH [VR] Physical boomerang throw (VrBoomerang.cpp). Vanilla commits the throw at frame 6 of
+// the throw animation (func_808359FC); here the hand's release is the commit. This mirrors that
+// block — same actor, same lock-on homing (moveTo = focusActor), same return timer, thrown flag,
+// camera-parallel rule, SFX and voice — with the spawn point at the hand instead of 10 units
+// ahead of the body, and the flight direction (yaw AND pitch) from the hand's velocity instead
+// of Link's facing + focus pitch + the +14000 lead offset: the hand direction IS the aim, and
+// the homing bends it onto a locked target. `pos` in world units, `dir` a unit vector. Returns
+// the spawned actor (flagged vrPhysical so its return homes on the hand) or NULL.
+EnBoom* Player_VrThrowBoomerang(PlayState* play, Player* this, const float* pos, const float* dir) {
+    EnBoom* boomerang;
+    f32 dy;
+    s16 yaw;
+    s32 pitch;
+
+    if (pos == NULL || dir == NULL || this->actor.category != ACTORCAT_PLAYER || !VrBoomerang_Covers(this) ||
+        !VrItemSelect_SelectionAllowed() || this->heldItemAction != this->itemAction || this->unk_6AD != 0 ||
+        (this->stateFlags1 & (PLAYER_STATE1_BOOMERANG_THROWN | PLAYER_STATE1_IN_CUTSCENE | PLAYER_STATE1_IN_ITEM_CS |
+                              PLAYER_STATE1_DEAD)) ||
+        this->upperActionFunc == func_808359FC || gSaveContext.health == 0) {
+        return NULL;
+    }
+    // Same yaw convention as Player_VrReleaseItem: rot.y = 0 is +Z, sin(rot.y) is the X component.
+    yaw = Math_Atan2S(dir[2], dir[0]);
+    // EnBoom_Fly: velocity.y = -sin(rot.x) * 12, so rot.x = -asin(dir.y). Clamped to +-60 deg so a
+    // downward flick doesn't fire it straight into the floor.
+    dy = CLAMP(dir[1], -1.0f, 1.0f);
+    pitch = (s32)(-asinf(dy) * (0x8000 / M_PI));
+    pitch = CLAMP(pitch, -0x5555, 0x5555);
+
+    boomerang = (EnBoom*)Actor_Spawn(&play->actorCtx, play, ACTOR_EN_BOOM, pos[0], pos[1], pos[2], (s16)pitch, yaw, 0, 0);
+    if (boomerang == NULL) {
+        return NULL;
+    }
+    this->boomerangActor = &boomerang->actor;
+    boomerang->moveTo = this->focusActor;
+    boomerang->returnTimer = 20;
+    boomerang->vrPhysical = true;
+    this->stateFlags1 |= PLAYER_STATE1_BOOMERANG_THROWN;
+
+    if (!Player_CheckHostileLockOn(this)) {
+        Player_SetParallel(this);
+    }
+
+    this->unk_A73 = 4;
+    Player_PlaySfx(this, NA_SE_IT_BOOMERANG_THROW);
+    Player_PlayVoiceSfx(this, NA_SE_VO_LI_SWORD_N);
+    return boomerang;
 }
 
 void func_80836448(PlayState* play, Player* this, LinkAnimationHeader* anim) {

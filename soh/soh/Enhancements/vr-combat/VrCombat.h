@@ -213,6 +213,57 @@ void VrBottle_OnCatch(void);
 void VrBottle_Reset(void);
 int32_t Player_VrTryBottleCatch(struct PlayState* play, struct Player* player);
 
+// Physical boomerang (VrBoomerang.cpp — selector mode). The boomerang has no held actor in
+// vanilla (selection only sets a flag; EnBoom exists from the throw to the return), so it gets
+// its own VR-only state machine instead of the VrItemThrow carry path: POCKET — selecting it
+// presents a shrunken gBoomerangRefDL at the bombchu's pocket point (Link's fist model hidden);
+// HELD — a fresh grip within reach takes it as a virtual carry, drawn rigidly parented to the
+// hand (VrPocket::Grab); the carry hand's grip release with hand speed >= gVrBoomerangThrowMinSpeed
+// throws (Player_VrThrowBoomerang: the vanilla frame-6 spawn with direction from the hand's
+// velocity, vanilla lock-on homing, speed, stun, fetch, bounce), a still release puts it back
+// in the pocket, and so do switching, the sword chord, F9 and a save-state load; THROWN — the
+// module feeds the actor the catch hand every tick (EnBoom vr* fields) so the return leg flies
+// to the HAND; grip closed as it arrives = caught into that hand (ready to throw again), grip
+// open = vanilla end and the pocket re-presents it. Returning while another item is selected
+// keeps vanilla's silent recovery plus a catch sound and a light haptic. Covers: boomerang
+// selected in normal selector play (galleries/bowling/horse/water excluded; gVrPhysBoomerang
+// toggles). Tick runs at the native item boundary next to VrItemThrow_Tick. PreviewIsModel:
+// the pocket is showing (selector icon stands down). HidesHandModel: the module owns the
+// boomerang model this frame (pocket / hand / flight), so Link's fist draws open.
+// TriggerStandsDown: the trigger mirror must not start the vanilla aim while the boomerang is
+// pocketed or carried (it stays on in flight for FastBoomerang's recall, after the trigger has
+// been seen up once). GripConsumed: the grip loses its binding where it grabs, carries or
+// catches. Draw: the pocket / carried model on its own OnPlayDrawEnd hook.
+bool VrBoomerang_Covers(struct Player* player);
+void VrBoomerang_Tick(struct PlayState* play, struct Player* player);
+void VrBoomerang_Reset(void);
+bool VrBoomerang_PreviewIsModel(void);
+bool VrBoomerang_HidesHandModel(void);
+bool VrBoomerang_TriggerStandsDown(void);
+bool VrBoomerang_GripConsumed(int32_t hand, uint16_t mask);
+void VrBoomerang_Draw(void);
+typedef struct VrBoomerangDebug {
+    int32_t state;         // 0 none, 1 pocket, 2 held, 3 thrown
+    int32_t gate;          // 0 armed; 1 Physical Boomerang off; 2 boomerang not selected in normal play;
+                           // 3 paused / Link busy (state kept); 4 a boomerang not thrown by the hand is
+                           // in flight; 5 no pocket point (headset untracked)
+    int32_t carryHand;     // -1 none, 0 left, 1 right
+    int32_t throwHand;     // hand of the current / last throw, -1 none
+    float lastReleaseSpeed; // hand speed at the last carry release, m/s
+    float throwMinSpeed;    // must reach this to throw (else back to the pocket)
+    int32_t lastRelease;   // -1 none yet, 0 back to the pocket (too slow), 1 thrown, 2 throw refused
+    int32_t returnLeg;     // the thrown boomerang is on its way back
+    float handDistanceCm;  // returning boomerang -> catch hand
+    float catchRadiusCm;   // must sweep within this of the hand to arrive
+    int32_t catchArmed;    // the catch hand's grip is closed
+    int32_t lastReturn;    // -1 none yet, 0 missed (pocket), 1 caught (hand), 2 returned while another item was selected
+} VrBoomerangDebug;
+void VrBoomerang_GetDebug(VrBoomerangDebug* out);
+// z_player.c: the vanilla throw commit (func_808359FC frame 6) from a hand position and unit
+// direction. Returns the spawned EnBoom or NULL (guards refused / spawn failed).
+struct EnBoom* Player_VrThrowBoomerang(struct PlayState* play, struct Player* player, const float* pos,
+                                       const float* dir);
+
 // Projectile fire (VR first person, independent of physical combat): the walk-while-aiming
 // path only fires on the vanilla item-button RELEASE, so the aim hand's trigger is wired in
 // as the natural VR fire. FirePressed: rising edge of that trigger this tick (checked in the
