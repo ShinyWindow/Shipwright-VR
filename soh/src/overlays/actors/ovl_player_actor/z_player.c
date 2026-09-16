@@ -12,6 +12,7 @@
 #include "overlays/actors/ovl_Door_Shutter/z_door_shutter.h"
 #include "overlays/actors/ovl_En_Boom/z_en_boom.h"
 #include "overlays/actors/ovl_En_Arrow/z_en_arrow.h"
+#include "overlays/actors/ovl_En_Bom_Chu/z_en_bom_chu.h"
 #include "overlays/actors/ovl_En_Box/z_en_box.h"
 #include "overlays/actors/ovl_En_Door/z_en_door.h"
 #include "overlays/actors/ovl_En_Elf/z_en_elf.h"
@@ -3791,11 +3792,13 @@ void Player_VrModeExitClearHands(PlayState* play, Player* this) {
         this->csAction != 0 || gSaveContext.health == 0) {
         return;
     }
-    // Physically carried bomb/nut: gentle zero-impulse release, exactly like switching.
+    // Physically carried bomb/nut/bombchu: gentle zero-impulse release, exactly like switching.
     if ((this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) && this->heldActor != NULL &&
-        (this->heldItemAction == PLAYER_IA_BOMB || this->heldItemAction == PLAYER_IA_DEKU_NUT) &&
+        (this->heldItemAction == PLAYER_IA_BOMB || this->heldItemAction == PLAYER_IA_DEKU_NUT ||
+         this->heldItemAction == PLAYER_IA_BOMBCHU) &&
         this->heldActor->parent == &this->actor &&
-        ((this->heldActor->id == ACTOR_EN_BOM) || (this->heldActor->id == ACTOR_EN_ARROW))) {
+        ((this->heldActor->id == ACTOR_EN_BOM) || (this->heldActor->id == ACTOR_EN_ARROW) ||
+         (this->heldActor->id == ACTOR_EN_BOM_CHU))) {
         const float still[3] = { 0.0f, 0.0f, 0.0f };
         Player_VrReleaseItem(play, this, still);
     }
@@ -3835,8 +3838,10 @@ bool Player_VrGrabItem(PlayState* play, Player* this) {
         Player_GetItemOnButton(play, this->heldItemButton) != this->heldItemId) {
         return false;
     }
-    if (this->heldItemAction == PLAYER_IA_BOMB) {
-        Player_UseItem(play, this, this->heldItemId); // retains ammo and explosive-count gates
+    if (this->heldItemAction == PLAYER_IA_BOMB || this->heldItemAction == PLAYER_IA_BOMBCHU) {
+        // Player_InitExplosiveIA spawns, spends and sets CARRYING for both explosives; the
+        // bombchu's fuse starts here, as in vanilla. Retains ammo and explosive-count gates.
+        Player_UseItem(play, this, this->heldItemId);
     } else if (this->heldItemAction == PLAYER_IA_DEKU_NUT) {
         // Same gates as vanilla nut use (func_8083C61C): ammo, room restriction, grounded.
         if (AMMO(ITEM_NUT) == 0 || play->roomCtx.curRoom.behaviorType1 == ROOM_BEHAVIOR_TYPE1_2 ||
@@ -3892,6 +3897,13 @@ void Player_VrReleaseItem(PlayState* play, Player* this, const float* velocity) 
         EnArrow* nut = (EnArrow*)held;
         nut->vrPhysicalThrow = true;
         nut->vrLaunchVelocity = held->velocity;
+    } else if (held->id == ACTOR_EN_BOM_CHU) {
+        // No throw exists for the chu: every VR release (grip, switch, mode exit, restored
+        // hold) falls from the hand and crawls once landed. The crawl direction, when the
+        // release had a controller to read, is set by VrItemThrow before this call.
+        ((EnBomChu*)held)->vrPhysicalDrop = true;
+        held->velocity.x = held->velocity.y = held->velocity.z = 0.0f;
+        held->speedXZ = 0.0f;
     }
     Player_DetachHeldActor(play, this);
     Player_VrRestorePassiveSelection(this, action, item);
@@ -12780,14 +12792,15 @@ void Player_Update(Actor* thisx, PlayState* play) {
         }
 
         if ((this->heldActor != NULL) && (this->heldActor->update == NULL)) {
-            // SOH [VR] A physically carried bomb/nut that died in hand (exploded, despawned):
+            // SOH [VR] A physically carried bomb/nut/bombchu that died in hand (exploded, despawned):
             // the explosive detach path below would stow the selection to ITEM_NONE_FE. Capture
             // identity first and return the selection to its passive preview — no replacement
             // actor is spawned and nothing is refunded; the player must grip the preview again.
             const s8 vrAction = this->heldItemAction;
             const u8 vrItem = this->heldItemId;
             const s32 vrRestore = VrItemThrow_Active(this) && (this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) &&
-                                  ((this->heldActor->id == ACTOR_EN_BOM) || (this->heldActor->id == ACTOR_EN_ARROW));
+                                  ((this->heldActor->id == ACTOR_EN_BOM) || (this->heldActor->id == ACTOR_EN_ARROW) ||
+                                   (this->heldActor->id == ACTOR_EN_BOM_CHU));
             Player_DetachHeldActor(play, this);
             if (vrRestore) {
                 Player_VrRestorePassiveSelection(this, vrAction, vrItem);

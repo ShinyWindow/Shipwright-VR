@@ -120,11 +120,16 @@ void Player_VrCancelPreparedItem(struct PlayState* play, struct Player* player);
 // Gently releases a carried throwable (zero impulse), cancels prepared aiming without
 // firing or spending, then vanilla put-away where safe. Never touches hookshot flight.
 void Player_VrModeExitClearHands(struct PlayState* play, struct Player* player);
-// Preview/grip adapter for bombs and nuts. Tick runs at the native item boundary.
+// Preview/grip adapter for bombs, nuts and bombchus (the chu drops and crawls instead of
+// throwing; gVrPhysBombchuDrop gates it alone). Tick runs at the native item boundary.
 bool VrItemThrow_Active(struct Player* player);
 void VrItemThrow_Tick(struct PlayState* play, struct Player* player);
 void VrItemThrow_Reset(void);
 bool VrItemThrow_PreviewPosition(float* position);
+// True while the presented item is a real model (the bombchu) rather than an item icon; the
+// selector's passive icon stands down and VrItemThrow_DrawPreview draws it.
+bool VrItemThrow_PreviewIsModel(void);
+void VrItemThrow_DrawPreview(void);
 bool VrItemThrow_GripConsumed(int32_t hand, uint16_t mask);
 void VrItemThrow_UpdateCarryPose(struct Player* player);
 bool Player_VrGrabItem(struct PlayState* play, struct Player* player);

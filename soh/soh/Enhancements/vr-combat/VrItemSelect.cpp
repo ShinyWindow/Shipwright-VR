@@ -455,6 +455,7 @@ extern "C" void VrItemSelect_Draw(void) {
             player->heldItemId >= 158 || player->heldActor != NULL ||
             (player->modelGroup != PLAYER_MODELGROUP_DEFAULT &&
              player->heldItemAction != PLAYER_IA_BOMB && player->heldItemAction != PLAYER_IA_BOMBCHU)) return;
+        if (VrItemThrow_PreviewIsModel()) return; // the bombchu preview is a real model, drawn by VrItemThrow
         float position[3], rotation[4];
         if (!VrItemThrow_PreviewPosition(position) && !VR_GetHandPose(SwordHand(), position, rotation)) return;
         sAnchor = { position[0], position[1], position[2] };

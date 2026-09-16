@@ -20,6 +20,13 @@ typedef struct EnBomChu {
     /* 0x0180 */ s32 blure2Index;
     /* 0x0184 */ ColliderJntSph collider;
     /* 0x01A4 */ ColliderJntSphElement colliderElements[1];
-} EnBomChu; // size = 0x01E4
+    // SOH [VR] Physical drop: released from the VR grip, the chu falls straight down from the
+    // release point and only starts crawling once it lands. Travels with the actor (savestates).
+    u8 vrPhysicalDrop;  // released by the VR grip: fall from here, then crawl
+    u8 vrHasCrawlYaw;   // vrCrawlYaw is valid (else Link's facing at landing)
+    s16 vrCrawlYaw;     // binang, horizontal direction to crawl once landed
+    s16 vrFallTicks;    // safety: explode if no floor after N ticks
+    f32 vrFallSpeed;    // own integrator: Actor_MoveXYZ has no gravity
+} EnBomChu; // size = 0x01E4 (vanilla portion)
 
 #endif

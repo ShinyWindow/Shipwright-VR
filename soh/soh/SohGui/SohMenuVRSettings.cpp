@@ -1585,7 +1585,7 @@ void SohMenu::AddMenuVRSettings() {
     // stable input settings, so the mess stays contained while items are being tuned.
     AddSidebarEntry("VR Settings", "Dev Test Items", 1);
     WidgetPath devPath = { "VR Settings", "Dev Test Items", SECTION_COLUMN_1 };
-    AddWidget(devPath, "Bombs & Nuts", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Bombs, Nuts & Bombchus", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Bomb and Nut Throws", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysicalItemThrows")
         .Options(CheckboxOptions()
@@ -1594,6 +1594,26 @@ void SohMenu::AddMenuVRSettings() {
                               "with your sword hand and squeeze grip to grab; release grip to throw. "
                               "Switching equipment drops the held item without a throw impulse. "
                               "Disable for button-operated use after selection."));
+    AddWidget(devPath, "Physical Bombchu Drop", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysBombchuDrop")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Selecting a bombchu shows a preview in front of you. Grab it with grip "
+                              "(the fuse starts then, as in the base game) and let go anywhere: it "
+                              "drops straight down from your hand, lands, and crawls off in the "
+                              "direction the controller was pointing. No throw, however fast your "
+                              "hand moved. Needs Physical Bomb and Nut Throws on. Disable for the "
+                              "base game's put-down after selection."));
+    AddWidget(devPath, "Bombchu Preview Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrChuPreviewScale")
+        .Options(FloatSliderOptions()
+                     .Min(10.0f)
+                     .Max(100.0f)
+                     .DefaultValue(50.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the presented bombchu as a percent of a real one. You grab it "
+                              "with the orientation it shows; it then rides your hand exactly as taken."));
     AddWidget(devPath, "Slingshot & Bow", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Archery", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysArchery")

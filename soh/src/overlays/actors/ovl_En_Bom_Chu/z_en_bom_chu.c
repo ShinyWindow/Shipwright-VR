@@ -12,6 +12,7 @@ void EnBomChu_Update(Actor* thisx, PlayState* play);
 void EnBomChu_Draw(Actor* thisx, PlayState* play);
 
 void EnBomChu_WaitForRelease(EnBomChu* this, PlayState* play);
+void EnBomChu_VrFall(EnBomChu* this, PlayState* play);
 void EnBomChu_Move(EnBomChu* this, PlayState* play);
 void EnBomChu_WaitForKill(EnBomChu* this, PlayState* play);
 
@@ -93,6 +94,13 @@ void EnBomChu_Init(Actor* thisx, PlayState* play) {
     this->actor.room = -1;
     this->timer = 120;
     this->actionFunc = EnBomChu_WaitForRelease;
+
+    // SOH [VR] Physical-drop state; set by the VR release, never by vanilla.
+    this->vrPhysicalDrop = false;
+    this->vrHasCrawlYaw = false;
+    this->vrCrawlYaw = 0;
+    this->vrFallTicks = 0;
+    this->vrFallSpeed = 0.0f;
 }
 
 void EnBomChu_Destroy(Actor* thisx, PlayState* play) {
@@ -203,6 +211,34 @@ void EnBomChu_UpdateFloorPoly(EnBomChu* this, CollisionPoly* floorPoly, PlayStat
     }
 }
 
+// Release tail shared by the vanilla put-down and the SOH [VR] physical drop: orient the crawl
+// frame to `yaw`, align it to the current floor poly and start moving. Expects floorPoly to
+// have been filled in by a floor bg check just before.
+static void EnBomChu_StartCrawl(EnBomChu* this, PlayState* play, s16 yaw) {
+    this->actor.shape.rot.y = yaw;
+
+    // rot.y = 0 -> +z (forwards in model space)
+    this->axisForwards.x = Math_SinS(this->actor.shape.rot.y);
+    this->axisForwards.y = 0.0f;
+    this->axisForwards.z = Math_CosS(this->actor.shape.rot.y);
+
+    // +y (up in model space)
+    this->axisUp.x = 0.0f;
+    this->axisUp.y = 1.0f;
+    this->axisUp.z = 0.0f;
+
+    // rot.y = 0 -> +x (left in model space)
+    this->axisLeft.x = Math_SinS(this->actor.shape.rot.y + 0x4000);
+    this->axisLeft.y = 0;
+    this->axisLeft.z = Math_CosS(this->actor.shape.rot.y + 0x4000);
+
+    this->actor.speedXZ = 8.0f;
+    EnBomChu_UpdateFloorPoly(this, this->actor.floorPoly, play);
+    this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED; // make chu targetable
+    Actor_PlaySfx_SurfaceBomb(play, &this->actor);
+    this->actionFunc = EnBomChu_Move;
+}
+
 void EnBomChu_WaitForRelease(EnBomChu* this, PlayState* play) {
     Player* player = GET_PLAYER(play);
 
@@ -216,32 +252,72 @@ void EnBomChu_WaitForRelease(EnBomChu* this, PlayState* play) {
     }
 
     if (Actor_HasNoParent(&this->actor, play)) {
+        // SOH [VR] Released by the VR grip: keep the release position and fall from it. The
+        // vanilla put-down below teleports to Link's feet, which is exactly what a physical
+        // drop must not do.
+        if (this->vrPhysicalDrop) {
+            this->vrFallSpeed = 0.0f;
+            this->vrFallTicks = 0;
+            this->actionFunc = EnBomChu_VrFall;
+            return;
+        }
+
         this->actor.world.pos = player->actor.world.pos;
         Actor_UpdateBgCheckInfo(play, &this->actor, 0.0f, 0.0f, 0.0f, 4);
-        this->actor.shape.rot.y = player->actor.shape.rot.y;
-
-        // rot.y = 0 -> +z (forwards in model space)
-        this->axisForwards.x = Math_SinS(this->actor.shape.rot.y);
-        this->axisForwards.y = 0.0f;
-        this->axisForwards.z = Math_CosS(this->actor.shape.rot.y);
-
-        // +y (up in model space)
-        this->axisUp.x = 0.0f;
-        this->axisUp.y = 1.0f;
-        this->axisUp.z = 0.0f;
-
-        // rot.y = 0 -> +x (left in model space)
-        this->axisLeft.x = Math_SinS(this->actor.shape.rot.y + 0x4000);
-        this->axisLeft.y = 0;
-        this->axisLeft.z = Math_CosS(this->actor.shape.rot.y + 0x4000);
-
-        this->actor.speedXZ = 8.0f;
         //! @bug there is no NULL check on the floor poly.  If the player is out of bounds the floor poly will be NULL
-        //! and will cause a crash inside this function.
-        EnBomChu_UpdateFloorPoly(this, this->actor.floorPoly, play);
-        this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED; // make chu targetable
-        Actor_PlaySfx_SurfaceBomb(play, &this->actor);
-        this->actionFunc = EnBomChu_Move;
+        //! and will cause a crash inside EnBomChu_UpdateFloorPoly.
+        EnBomChu_StartCrawl(this, play, player->actor.shape.rot.y);
+    }
+}
+
+// SOH [VR] Physical drop: the chu falls straight down from where the hand let go (no
+// horizontal impulse, whatever the hand was doing), lands on whatever floor is under it, then
+// crawls in the direction the controller pointed at release (or Link's facing when no intent
+// was recorded, e.g. a release forced by switching items). From landing on, everything is the
+// vanilla EnBomChu_Move. The fuse keeps burning throughout.
+void EnBomChu_VrFall(EnBomChu* this, PlayState* play) {
+    Player* player = GET_PLAYER(play);
+    s16 yaw;
+
+    if (this->timer != 0) {
+        this->timer--;
+    }
+
+    if (this->timer == 0) {
+        EnBomChu_Explode(this, play);
+        return;
+    }
+
+    // Own integrator: Actor_MoveXYZ (in Update) rebuilds actor.velocity from speedXZ every
+    // tick and applies no gravity, so the fall has to live in world.pos directly. Same gravity
+    // as a thrown bomb (-1.2 units/tick^2), terminal speed capped.
+    this->actor.speedXZ = 0.0f;
+    this->vrFallSpeed = CLAMP_MIN(this->vrFallSpeed - 1.2f, -20.0f);
+    this->actor.world.pos.y += this->vrFallSpeed;
+
+    // Floor-only check, the same call the vanilla put-down makes: raycasts down from last
+    // tick's height, snaps pos.y onto the floor and fills floorPoly/floorBgId when landed.
+    Actor_UpdateBgCheckInfo(play, &this->actor, 0.0f, 0.0f, 0.0f, 4);
+
+    if (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) {
+        if ((this->actor.floorPoly == NULL) || (this->actor.floorHeight <= BGCHECK_Y_MIN)) {
+            // Never hand a NULL poly to EnBomChu_UpdateFloorPoly (the documented vanilla crash).
+            EnBomChu_Explode(this, play);
+            return;
+        }
+        yaw = this->vrHasCrawlYaw ? this->vrCrawlYaw : player->actor.shape.rot.y;
+        // Actor_MoveXYZ drives the crawl along world.rot; vanilla inherits Link's spawn yaw
+        // there, the physical drop has its own intent. Flat start: x/z rotation cleared.
+        this->actor.world.rot.x = 0;
+        this->actor.world.rot.y = yaw;
+        this->actor.world.rot.z = 0;
+        EnBomChu_StartCrawl(this, play, yaw);
+        return;
+    }
+
+    if (++this->vrFallTicks > 60) {
+        // Three seconds without a floor: it fell into a void. Explode rather than leak an actor.
+        EnBomChu_Explode(this, play);
     }
 }
 
@@ -435,7 +511,8 @@ void EnBomChu_Update(Actor* thisx, PlayState* play2) {
 
     CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
 
-    if (this->actionFunc != EnBomChu_WaitForRelease) {
+    // SOH [VR] No OC while falling either: a chu dropped past Link's body must not be shoved.
+    if ((this->actionFunc != EnBomChu_WaitForRelease) && (this->actionFunc != EnBomChu_VrFall)) {
         CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
     }
 
