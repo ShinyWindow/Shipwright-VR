@@ -25,9 +25,44 @@ bool VrCombat_Active(void);
 // --- Physical melee (VrSwing.cpp) ---
 
 // The held melee weapon is handled by physical combat: swords (Master/Kokiri/Biggoron, incl.
-// the broken Giant's Knife) and the Deku stick. The hammer keeps vanilla button combat until
-// its two-hand milestone. Also false for the co-op partner (only the real player swings).
+// the broken Giant's Knife), the Deku stick and the Megaton Hammer (gVrPhysHammer; off = the
+// hammer keeps vanilla button combat). Also false for the co-op partner (only the real player
+// swings).
 bool VrCombat_MeleeCovered(struct Player* player);
+
+// Physical Megaton Hammer (VrHammer.cpp + the hammer branch of VrSwing.cpp's melee feed). A
+// heavy two-handed weapon: the head is a simulated mass that trails the hands (the sim's
+// torque-limited orientation spring, soft one-handed, firm two-handed) and droops under
+// gravity; it never cuts through anything — it stops dead on walls, floors and bodies. The
+// off hand takes the handle with a fresh grip within gVrHammerGripReach of it (lets go only on
+// grip release); while held, Link's off hand is drawn pinned
+// to the handle. Damage uses the vanilla hammer row (DMG_HAMMER_SWING, DMG_HAMMER_JUMP past the
+// heavy speed), so rusted switches, boulders and breakable walls answer as in the base game.
+// GripConsumed: the off hand's grip loses its binding (R) while it holds the handle or is within
+// reach of it, and never counts toward the quick-swap chord there.
+bool VrHammer_GripConsumed(int32_t hand, uint16_t mask);
+typedef struct VrHammerDebug {
+    int32_t gate;           // 0 armed; 1 Physical Hammer off; 2 hammer not in hand (or combat inactive)
+    int32_t twoHand;        // the off hand holds the handle
+    int32_t offInReach;     // the off hand is within reach of the handle (a grip would take it)
+    float offHandCm;        // off hand -> nearest point on the handle
+    float reachCm;          // must be within this to take hold
+    float headMps;          // simulated head speed this tick
+    int32_t tier;           // 0 idle, 1 armed (windup), 2 hot (a hit would land)
+    float lastImpactMps;    // approach speed of the head at its last contact
+    int32_t lastImpact;     // -1 none yet, 0 soft touch, 1 GROUND POUND, 2 wall strike, 3 body / object
+    int32_t lastStrike;     // the last contact queued damage (0 no, 1 swing class, 2 heavy class)
+    float poundSpeed;       // a floor contact at or above this approach speed pounds
+    float hitSpeed;         // a contact at or above this approach speed deals damage
+} VrHammerDebug;
+void VrHammer_GetDebug(VrHammerDebug* out);
+// Implemented in z_player.c (// SOH [VR]): the head physically met the world hard enough to count.
+// ground (a floor-facing surface) = the vanilla ground pound: func_80842A28 (quake, rumble,
+// NA_SE_IT_HAMMER_HIT and actorCtx.unk_02 = 4 — the "hammer hit the ground" flag nearby actors
+// read: Tektites and torch slugs flip, scrubs stun, Ganon's collapsing floor cracks) plus the
+// white shockwave at pos. Otherwise the vanilla wall strike: the same composite plus the hit-stop
+// freeze — without the recoil shove (VR comfort) and without ending anything.
+void Player_VrHammerImpact(struct PlayState* play, struct Player* player, const float* pos, int32_t ground);
 
 // Implemented in z_player.c (// SOH [VR]): forwards to the vanilla landed-hit durability
 // composite func_80842CF0 — the Deku stick snaps (half-stick effect, ammo, put away) and the
@@ -116,6 +151,9 @@ bool VrItemSelect_SelectionAllowed(void);
 // 0 = wait, 1 = equipment changed, 2 = rejected/idempotent (preserve held input).
 int32_t Player_VrSelectItem(struct PlayState* play, struct Player* player, int32_t slot);
 void Player_VrCancelPreparedItem(struct PlayState* play, struct Player* player);
+// z_player_lib: weld a matrix computed this frame (curMf16, MtxF layout) to the LIVE pose of a
+// VR hand, like the bowstring — for held geometry drawn outside the player (the nocked arrow).
+int32_t Player_VrWeldMtxToHand(struct PlayState* play, const void* mtx, int32_t vrHand, const float* curMf16);
 // Falling edge of selector mode (third person, flat screen, F9): clears Link's hands.
 // Gently releases a carried throwable (zero impulse), cancels prepared aiming without
 // firing or spending, then vanilla put-away where safe. Never touches hookshot flight.
@@ -165,6 +203,18 @@ uint16_t VrArchery_ItemButtonMask(void);
 bool VrArchery_PinchConsumed(int32_t vrHand, uint16_t vrBtnMask);
 bool VrArchery_AimSegment(float* outPosDir6);
 void VrArchery_Reset(void);
+// Fairy Bow profile (geometry read off the bow model; the slingshot keeps its tuned anchor).
+// BowStringNock: world point the drawn bowstring's apex belongs at (string hand, capped at max
+// draw); false when no bow nock is drawn. TakeBowShotPower: draw strength (0.3..1) of the bow
+// shot now leaving, consumed once by EnArrow_Shoot; 0 = not a physical bow shot (stay vanilla).
+bool VrArchery_BowStringNock(float* out3);
+float VrArchery_TakeBowShotPower(void);
+// BowAlignedMatrix: while a bow nock is drawn, rewrites the bow hand's limb matrix (MtxF layout,
+// in place) so the bow points along the string hand -> arrow rest line; false = leave it raw.
+bool VrArchery_BowAlignedMatrix(int32_t vrHand, float* mf16);
+// NockedArrowHand: the VR hand the nocked arrow is welded to (the bow hand, like the string)
+// while a bow nock is drawn; -1 otherwise (the arrow draws exactly as vanilla).
+int32_t VrArchery_NockedArrowHand(void);
 
 // Physical bottle scooping (VrBottle.cpp — selector mode): an EMPTY bottle catches by
 // moving its MOUTH (bottle-hand controller + grip-local offset) into a catchable's volume — no
@@ -264,6 +314,19 @@ void VrBoomerang_GetDebug(VrBoomerangDebug* out);
 struct EnBoom* Player_VrThrowBoomerang(struct PlayState* play, struct Player* player, const float* pos,
                                        const float* dir);
 
+// Two-trigger spell casting (VrMagic.cpp — selector mode): Din's Fire, Farore's Wind, Nayru's
+// Love cast only while BOTH triggers are down (VrItemSelect_TriggerItemMask withholds the spell's
+// button otherwise). Covers: a spell selected in normal selector play (horse/water/minigames
+// excluded; gVrPhysMagicChord toggles). BeginCharge (func_8083AF44, the vanilla cast setup): the
+// wind-up is ours when it began from the chord. ChargeTick (each wind-up tick of
+// Player_Action_808507F4, progress 0..1 through gPlayerAnim_link_magic_tame): builds the haptic;
+// 1 = a trigger was released, cancel the cast (nothing spent). OnCast: the spell spawned.
+bool VrMagic_Covers(struct Player* player);
+bool VrMagic_ChordHeld(void);
+void VrMagic_BeginCharge(struct PlayState* play, struct Player* player);
+int32_t VrMagic_ChargeTick(struct PlayState* play, struct Player* player, float progress);
+void VrMagic_OnCast(void);
+
 // Projectile fire (VR first person, independent of physical combat): the walk-while-aiming
 // path only fires on the vanilla item-button RELEASE, so the aim hand's trigger is wired in
 // as the natural VR fire. FirePressed: rising edge of that trigger this tick (checked in the
@@ -276,6 +339,35 @@ bool VrCombat_AimTriggerConsumed(int32_t vrHand, uint16_t vrBtnMask);
 // vanilla stance quad, whose size/offset never matched a controller-held shield. Strictness =
 // dimensions smaller than the visible shield: rim grazes miss the collider entirely.
 void VrCombat_ShieldQuadModelVerts(float* outXyz4);
+
+// Hookshot / Longshot (VrHookshot.cpp — VR first person). InSwordHand: while the hookshot model
+// is in Link's R_HAND limb (and gVrHookshotSwordHand, motion hands on), that limb rides the
+// SWORD-hand (dominant) controller and L_HAND the off hand — the motion-hands limb override
+// swaps them, unmirrored. RightLimbHand: the controller driving R_HAND right now (the off hand
+// otherwise); the aim ray, the trigger mirror and classic fire all ask it. NoteAim (z_player_lib.c,
+// right after Player_VrAimHeldProjectile aimed the idle hook): this frame's flight line — the
+// hook's world.pos/world.rot, the controller, its 20 Hz hand-limb snapshot (MtxF, may be NULL)
+// and the reach in world units — for the laser (gVrHookshotLaser), drawn at OnPlayDrawEnd as a
+// child of the live hand matrix.
+bool VrHookshot_InSwordHand(struct Player* player);
+int32_t VrHookshot_RightLimbHand(struct Player* player);
+void VrHookshot_NoteAim(struct Player* player, struct Actor* hook, int32_t vrHand, const float* handMtxF16,
+                        float rangeUnits);
+// Hookshot-only aim trim, applied by Player_VrAimHeldProjectile on top of the shared Weapon Aim
+// Trim, to the aim ray (pos/dir, world units) of the controller holding the hookshot:
+// gVrHookshotAimPitch/Yaw (degrees, up/right) turn the direction, gVrHookshotAimRight/Up/Fwd (cm,
+// in the controller's frame) move the launch point. Right and yaw mirror when the hookshot is in
+// the left controller, so a tuned value means the same thing in either hand. The laser and the
+// reticle trace the hook's resulting line, so they follow the trim.
+void VrHookshot_TrimAimRay(int32_t vrHand, float* pos3, float* dir3);
+// BarrelAim (gVrHookshotBarrelAim, default on): the hook aims from the hookshot MODEL — the
+// vanilla in-hand hook transform, which the controller-driven R_HAND limb already carries — so it
+// sits in the barrel, points along it and flies along it; off = the controller's aim ray. The
+// hookshot trim applies on top either way. WeldIdleHook (ArmsHook_Draw, per matrix it draws while
+// the hook is idle in the hand): registers that Mtx as a child of the live hand, so the hook and
+// its stub of chain ride the controller at headset rate instead of trailing at the 20 Hz tick.
+bool VrHookshot_BarrelAim(void);
+void VrHookshot_WeldIdleHook(struct Actor* hook, const void* mtx);
 
 #ifdef __cplusplus
 }
@@ -306,6 +398,22 @@ const TickPath& GetTickPath(int hand);
 void Swing_OnPlayerUpdate(PlayState* play, Player* player);
 // Falling edge of VrCombat_Active(): hand melee state back to vanilla (state 0, trail off).
 void Swing_Deactivate(PlayState* play, Player* player);
+
+// Megaton Hammer grip state (VrHammer.cpp). The melee feed caches the handle's grip-local
+// geometry each draw (world units, in the frame of the SERVED lead-hand pose); the tick uses it
+// to take / release the handle with the off hand. HammerGrip is what the next feed pushes to the
+// held-object sim (secondary hand + its grip point on the handle).
+struct HammerGrip {
+    bool twoHand;
+    int offHand;
+    float secondaryLocal[3]; // grip-local world units: the off hand's point on the handle
+};
+const HammerGrip& Hammer_GetGrip();
+void Hammer_SetHandleLocal(const float buttLocal[3], const float neckLocal[3]);
+void Hammer_Tick(PlayState* play, Player* player);
+void Hammer_Reset();
+void Hammer_NoteSwing(float headMps, int tier);
+void Hammer_NoteImpact(float approachMps, int kind, int strike);
 
 // Per-tick shield bookkeeping (VrShield.cpp): keeps the shield model in the off hand while
 // physically held, restores the vanilla models on the falling edge.

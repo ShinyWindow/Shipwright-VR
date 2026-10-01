@@ -9,6 +9,7 @@
 #include "objects/object_gi_nuts/object_gi_nuts.h"
 
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -247,6 +248,18 @@ void EnArrow_Shoot(EnArrow* this, PlayState* play) {
         } else {
             Actor_SetProjectileSpeed(&this->actor, 150.0f);
             this->timer = 12;
+            // SOH [VR] Physical bow: draw strength sets the shot. A full draw is exactly this
+            // vanilla shot; a partial draw leaves slower, falls from the start, and lives longer
+            // so a weak arrow drops to the ground instead of vanishing mid-air.
+            {
+                f32 vrPower = VrArchery_TakeBowShotPower();
+                if (vrPower > 0.0f && vrPower < 0.99f) {
+                    f32 vrWeak = (1.0f - vrPower) / 0.7f;
+                    Actor_SetProjectileSpeed(&this->actor, 150.0f * vrPower);
+                    this->timer = 12 + (s32)(12.0f * vrWeak);
+                    this->actor.gravity = -1.0f * vrWeak;
+                }
+            }
         }
         // SOH [VR] Physical nuts retain vanilla impact/stun logic, but launch from
         // the released hand velocity instead of the animation's fixed speed.
@@ -322,7 +335,10 @@ void EnArrow_Fly(EnArrow* this, PlayState* play) {
     }
 
     if (this->timer < 7.2000003f) {
-        this->actor.gravity = -0.4f;
+        // SOH [VR] Keep a weak physical-bow shot's stronger fall (vanilla arrows reach here at 0).
+        if (!((this->actor.params < ARROW_SEED) && (this->actor.gravity < -0.4f))) {
+            this->actor.gravity = -0.4f;
+        }
     }
 
     atTouched = (this->actor.params != ARROW_NORMAL_LIT) && (this->actor.params <= ARROW_SEED) &&
@@ -516,6 +532,31 @@ void func_809B4800(EnArrow* this, PlayState* play) {
     }
 }
 
+// SOH [VR] Nocked physical-bow arrow: its world.pos/shape.rot are written at game rate, but the
+// bow and string render at headset rate from the live hand, so the arrow visibly trailed them.
+// This limb hook draws each limb exactly as SkelAnime_DrawLimbLod would, but welds the limb's
+// matrix to the live bow hand (as the bowstring is). Only used while the arrow is the player's
+// drawn bow nock; a failed weld leaves the ordinary matrix in place.
+static s32 EnArrow_VrWeldLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {
+    MtxF vrCur;
+    Mtx* vrMtx;
+    s32 vrHand = VrArchery_NockedArrowHand();
+
+    if ((*dList == NULL) || (vrHand < 0)) {
+        return false;
+    }
+    Matrix_TranslateRotateZYX(pos, rot);
+    Matrix_Get(&vrCur);
+    vrMtx = MATRIX_NEWMTX(play->state.gfxCtx);
+    Player_VrWeldMtxToHand(play, vrMtx, vrHand, &vrCur.mf[0][0]);
+
+    OPEN_DISPS(play->state.gfxCtx);
+    gSPMatrix(POLY_OPA_DISP++, vrMtx, G_MTX_LOAD);
+    gSPDisplayList(POLY_OPA_DISP++, *dList);
+    CLOSE_DISPS(play->state.gfxCtx);
+    return true;
+}
+
 void EnArrow_Draw(Actor* thisx, PlayState* play) {
     s32 pad;
     EnArrow* this = (EnArrow*)thisx;
@@ -523,8 +564,13 @@ void EnArrow_Draw(Actor* thisx, PlayState* play) {
     f32 scale;
 
     if (this->actor.params <= ARROW_0E) {
+        Player* vrPlayer = GET_PLAYER(play);
+        // SOH [VR] Weld only the player's drawn bow nock (see EnArrow_VrWeldLimbDraw).
+        s32 vrWeld = (this->actor.parent == &vrPlayer->actor) && (vrPlayer->heldActor == &this->actor) &&
+                     (VrArchery_NockedArrowHand() >= 0);
         Gfx_SetupDL_25Opa(play->state.gfxCtx);
-        SkelAnime_DrawLod(play, this->skelAnime.skeleton, this->skelAnime.jointTable, NULL, NULL, this,
+        SkelAnime_DrawLod(play, this->skelAnime.skeleton, this->skelAnime.jointTable,
+                          vrWeld ? EnArrow_VrWeldLimbDraw : NULL, NULL, this,
                           (this->actor.projectedPos.z < MREG(95)) ? 0 : 1);
     } else if (this->actor.speedXZ != 0.0f) {
         alpha = (Math_CosS(this->timer * 5000) * 127.5f) + 127.5f;

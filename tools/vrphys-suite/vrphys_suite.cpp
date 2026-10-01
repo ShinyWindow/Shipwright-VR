@@ -643,6 +643,354 @@ static void RunWeightLagCase() {
            (float)(steadySum / (steadyN ? steadyN : 1)), reboundPeak, residual);
 }
 
+// ---- Two-handed hold + heavy hammer (Megaton Hammer milestone) ----
+// Geometry mirrors the game's hammer at world scale 35: handle along grip-local +X, head centre
+// 0.54 m out, head axis along local Y (spike end -0.28 m .. face end +0.22 m about the handle
+// line), head radius 0.114 m; the second hand grips the butt 0.27 m behind the lead hand.
+static const float kHammerHeadX = 0.54f;
+static const float kHammerButtX = -0.27f;
+
+static VrPhysObjectDesc HammerDesc(float angFreq, float linFreq, bool twoHand, float gravity) {
+    VrPhysObjectDesc d{};
+    d.primary_hand = 1;
+    d.secondary_hand = twoHand ? 0 : -1;
+    d.lin_freq_hz = linFreq;
+    d.lin_zeta = 1.0f;
+    d.ang_freq_hz = angFreq;
+    d.ang_zeta = 0.8f;
+    d.max_accel_mps2 = 400.0f;
+    d.max_ang_accel = 3000.0f;
+    d.grip_local_root_m[0] = kHammerHeadX;
+    d.grip_local_root_m[1] = -0.28f;
+    d.grip_local_tip_m[0] = kHammerHeadX;
+    d.grip_local_tip_m[1] = 0.22f;
+    d.blade_radius_m = 0.114f;
+    d.touch_tolerance_m = 0.3f / kScale;
+    d.pivot_only = true;
+    d.contact_enabled = true;
+    d.friction = 0.5f;
+    d.passthrough_speed_mps = 0.0f; // a hammer never cuts through anything
+    d.grip_local_secondary_m[0] = kHammerButtX;
+    d.grip_local_com_m[0] = kHammerHeadX;
+    d.gravity_scale = gravity;
+    return d;
+}
+
+static float AngleDeg(const V3& a, const V3& b) {
+    float c = vdot(a, b) / (len(a) * len(b));
+    c = c > 1.0f ? 1.0f : (c < -1.0f ? -1.0f : c);
+    return acosf(c) * 180.0f / 3.14159265f;
+}
+
+static void PushHand(int hand, const V3& p, const Q4& q, const V3& v, const V3& w, uint64_t t) {
+    const float pos[3] = { p.x, p.y, p.z };
+    const float quat[4] = { q.x, q.y, q.z, q.w };
+    const float lin[3] = { v.x, v.y, v.z };
+    const float ang[3] = { w.x, w.y, w.z };
+    vrphys_push_hand_sample(hand, pos, quat, lin, ang, true, t);
+}
+
+static Q4 ObjQuat() {
+    float p[3], q[4], v[3], w[3];
+    vrphys_get_object_pose(VRPHYS_SLOT_WEAPON, p, q, v, w);
+    return { q[0], q[1], q[2], q[3] };
+}
+
+// Lead hand fixed at the origin with a fixed wrist; the off hand orbits it in the XY plane at the
+// butt distance. The handle (+X) must point from the off hand through the lead hand: ~0 error at
+// rest, a small spring lag while orbiting, and the roll must stay with the lead wrist.
+static void RunTwoHandAimCase() {
+    vrphys_reset();
+    const float turn[4] = { 0, 0, 0, 1 };
+    const float turnOff[3] = { 0, 0, 0 };
+    const float anchor[3] = { 0, 0, 0 };
+    vrphys_set_contact_prims(nullptr, 0);
+    VrPhysObjectDesc d = HammerDesc(8.0f, 12.0f, true, 0.0f);
+    vrphys_set_object(VRPHYS_SLOT_WEAPON, &d);
+    const float dt = 1.0f / 90.0f;
+    uint64_t t = 0;
+    const float r = -kHammerButtX;
+    float phi = 0.0f; // off hand starts straight behind: (-r, 0, 0)
+    double movingErr = 0;
+    int movingN = 0;
+    float restErr = 0.0f;
+    float rollErr = 0.0f;
+    for (int step = 0; step < 400; step++) {
+        const bool orbit = step >= 100 && step < 250;
+        const float rate = orbit ? 1.5f : 0.0f; // rad/s about +Z
+        phi += rate * dt;
+        const V3 p2 = { -r * cosf(phi), -r * sinf(phi), 0.0f };
+        const V3 v2 = { r * sinf(phi) * rate, -r * cosf(phi) * rate, 0.0f };
+        t += (uint64_t)(dt * 1e9f);
+        PushHand(1, kV3Zero, kQIdent, kV3Zero, kV3Zero, t);
+        PushHand(0, p2, kQIdent, v2, kV3Zero, t);
+        vrphys_step(dt, turn, turnOff, anchor, kScale, true);
+        const Q4 oq = ObjQuat();
+        const V3 handle = qrot(oq, { 1.0f, 0.0f, 0.0f });
+        const V3 want = mul(p2, -1.0f);
+        const float err = AngleDeg(handle, want);
+        if (step >= 150 && step < 250) {
+            movingErr += err;
+            movingN++;
+        }
+        if (step == 399) {
+            restErr = err;
+            // The lead wrist never rolled: the object's local +Z must stay perpendicular to the
+            // orbit plane (world +Z), whatever the handle direction.
+            rollErr = AngleDeg(qrot(oq, { 0.0f, 0.0f, 1.0f }), { 0.0f, 0.0f, 1.0f });
+        }
+    }
+    printf("  TWO-HAND aim (off hand orbits)| moving lag %5.2f deg (8 Hz spring, 1.5 rad/s) | rest "
+           "error %6.3f deg (expect ~0) | roll drift %6.3f deg (expect ~0)\n",
+           (float)(movingErr / (movingN ? movingN : 1)), restErr, rollErr);
+}
+
+// Tracking noise on BOTH hands, held still: the served off-hand pin must not jitter more than the
+// hands do (the aim runs over only ~27 cm of span, so noise could be amplified down the handle).
+static void RunTwoHandPinNoiseCase() {
+    vrphys_reset();
+    const float turn[4] = { 0, 0, 0, 1 };
+    const float turnOff[3] = { 0, 0, 0 };
+    const float anchor[3] = { 0, 0, 0 };
+    vrphys_set_contact_prims(nullptr, 0);
+    VrPhysObjectDesc d = HammerDesc(8.0f, 12.0f, true, 0.0f);
+    vrphys_set_object(VRPHYS_SLOT_WEAPON, &d);
+    const float dt = 1.0f / 90.0f;
+    uint64_t t = 0;
+    float prevPin[3] = { 0, 0, 0 };
+    V3 prevHead = kV3Zero;
+    double pinSum = 0, headSum = 0;
+    int n = 0;
+    for (int step = 0; step < 300; step++) {
+        const V3 p1 = { Noise(step, 1), Noise(step, 2), Noise(step, 3) };
+        const V3 p2 = { kHammerButtX + Noise(step, 4), Noise(step, 5), Noise(step, 6) };
+        t += (uint64_t)(dt * 1e9f);
+        PushHand(1, p1, kQIdent, kV3Zero, kV3Zero, t);
+        PushHand(0, p2, kQIdent, kV3Zero, kV3Zero, t);
+        vrphys_step(dt, turn, turnOff, anchor, kScale, true);
+        float pin[3], pq[4];
+        const bool served = vrphys_get_hand_sim_pose_raw(0, pin, pq);
+        float op[3], oq[4], ov[3], ow[3];
+        vrphys_get_object_pose(VRPHYS_SLOT_WEAPON, op, oq, ov, ow);
+        const V3 head = add(v3(op), mul(qrot(q4(oq), { kHammerHeadX, 0, 0 }), kScale));
+        if (step >= 100 && served) {
+            pinSum += len(sub(v3(pin), v3(prevPin))) * 1000.0f;
+            headSum += len(sub(head, prevHead)) / kScale * 1000.0f;
+            n++;
+        }
+        memcpy(prevPin, pin, sizeof(prevPin));
+        prevHead = head;
+    }
+    printf("  TWO-HAND noise, held still   | off-hand pin HF %6.3f mm/step | head HF %6.3f mm/step "
+           "(hand noise ~0.3 mm)\n",
+           (float)(pinSum / (n ? n : 1)), (float)(headSum / (n ? n : 1)));
+}
+
+// Taking hold with the second hand at an angle off the current handle line (a 15 deg re-aim),
+// then letting go: the object must swing over smoothly — no single-step snap.
+static void RunTwoHandGrabReleaseCase() {
+    vrphys_reset();
+    const float turn[4] = { 0, 0, 0, 1 };
+    const float turnOff[3] = { 0, 0, 0 };
+    const float anchor[3] = { 0, 0, 0 };
+    vrphys_set_contact_prims(nullptr, 0);
+    VrPhysObjectDesc one = HammerDesc(3.5f, 10.0f, false, 0.0f);
+    VrPhysObjectDesc two = HammerDesc(8.0f, 12.0f, true, 0.0f);
+    vrphys_set_object(VRPHYS_SLOT_WEAPON, &one);
+    const float dt = 1.0f / 90.0f;
+    uint64_t t = 0;
+    const float a = 15.0f * 3.14159265f / 180.0f;
+    const V3 p2 = { kHammerButtX * cosf(a), kHammerButtX * sinf(a), 0.0f };
+    Q4 prev = kQIdent;
+    float maxGrab = 0.0f, maxRelease = 0.0f, settled = 0.0f;
+    for (int step = 0; step < 450; step++) {
+        if (step == 150) {
+            vrphys_set_object(VRPHYS_SLOT_WEAPON, &two);
+        } else if (step == 300) {
+            vrphys_set_object(VRPHYS_SLOT_WEAPON, &one);
+        }
+        t += (uint64_t)(dt * 1e9f);
+        PushHand(1, kV3Zero, kQIdent, kV3Zero, kV3Zero, t);
+        PushHand(0, p2, kQIdent, kV3Zero, kV3Zero, t);
+        vrphys_step(dt, turn, turnOff, anchor, kScale, true);
+        const Q4 oq = ObjQuat();
+        const float stepDeg = AngleDeg(qrot(oq, { 1, 0, 0 }), qrot(prev, { 1, 0, 0 }));
+        if (step >= 150 && step < 300 && stepDeg > maxGrab) {
+            maxGrab = stepDeg;
+        }
+        if (step >= 300 && stepDeg > maxRelease) {
+            maxRelease = stepDeg;
+        }
+        if (step == 299) {
+            settled = AngleDeg(qrot(oq, { 1, 0, 0 }), { 1, 0, 0 });
+        }
+        prev = oq;
+    }
+    printf("  TWO-HAND grab/release 15 deg | max step on grab %5.2f deg | on release %5.2f deg "
+           "(smooth: a few deg) | re-aimed to %5.2f deg (expect 15)\n",
+           maxGrab, maxRelease, settled);
+}
+
+// One hand holding the handle level: gravity on the head must sag it by g / (L w^2).
+static void RunDroopCase() {
+    const float freqs[2] = { 3.5f, 8.0f };
+    for (float f : freqs) {
+        vrphys_reset();
+        const float turn[4] = { 0, 0, 0, 1 };
+        const float turnOff[3] = { 0, 0, 0 };
+        const float anchor[3] = { 0, 0, 0 };
+        vrphys_set_contact_prims(nullptr, 0);
+        VrPhysObjectDesc d = HammerDesc(f, 10.0f, false, 1.0f);
+        vrphys_set_object(VRPHYS_SLOT_WEAPON, &d);
+        const float dt = 1.0f / 90.0f;
+        uint64_t t = 0;
+        for (int step = 0; step < 400; step++) {
+            t += (uint64_t)(dt * 1e9f);
+            PushHand(1, kV3Zero, kQIdent, kV3Zero, kV3Zero, t);
+            vrphys_step(dt, turn, turnOff, anchor, kScale, true);
+        }
+        const V3 handle = qrot(ObjQuat(), { 1, 0, 0 });
+        const float sag = asinf(-handle.y) * 180.0f / 3.14159265f;
+        const float w = 2.0f * 3.14159265f * f;
+        const float expect = atanf(9.81f / (kHammerHeadX * w * w)) * 180.0f / 3.14159265f;
+        printf("  DROOP one hand, %4.1f Hz grip  | sag %5.2f deg (expect ~%4.2f)\n", f, sag, expect);
+    }
+}
+
+// Overhead slam onto a floor: the lead hand swings the hammer down about +Z at 9 rad/s (head
+// ~4.9 m/s) and keeps going 35 deg past the point where the head meets the floor. The head must
+// stop ON the floor (no tunnelling, no pass-through), stay constrained every pressed step, and
+// rest without jitter.
+static void RunHammerSlamCase(float hz) {
+    vrphys_reset();
+    const float turn[4] = { 0, 0, 0, 1 };
+    const float turnOff[3] = { 0, 0, 0 };
+    const float anchor[3] = { 0, 0, 0 };
+    // Floor at world y = -0.45 m (hand height 0.45 above the floor), in world units.
+    const float fy = -0.45f * kScale;
+    VrPhysContactPrim prims[2];
+    prims[0] = MakeTri(-100, fy, -100, -100, fy, 100, 100, fy, -100, 10);
+    prims[1] = MakeTri(100, fy, 100, 100, fy, -100, -100, fy, 100, 10);
+    vrphys_set_contact_prims(prims, 2);
+    VrPhysObjectDesc d = HammerDesc(8.0f, 12.0f, false, 0.0f);
+    vrphys_set_object(VRPHYS_SLOT_WEAPON, &d);
+    const float dt = 1.0f / hz;
+    uint64_t t = 0;
+    // Hammer starts pointing straight up (handle +X rotated +90 deg about Z) and swings over the
+    // top toward -X and down; rotating +Z moves the head along its local +Y — the flat face leads.
+    float theta = 1.5708f;
+    const float rate = 9.0f;
+    const float thetaEnd = 4.91f; // past straight down: the hand drives the head deep "into" the floor
+    float minHeadBottom = 1e9f;
+    int firstContact = -1;
+    int zeroAfter = 0;
+    double restSum = 0;
+    int restN = 0;
+    V3 prevTip = kV3Zero;
+    float impact = 0.0f;
+    for (int step = 0; step < (int)(hz * 3.0f); step++) {
+        const bool swinging = theta < thetaEnd;
+        if (swinging) {
+            theta += rate * dt;
+        }
+        const Q4 q = { 0, 0, sinf(theta * 0.5f), cosf(theta * 0.5f) };
+        const V3 w = { 0, 0, swinging ? rate : 0.0f };
+        t += (uint64_t)(dt * 1e9f);
+        PushHand(1, kV3Zero, q, kV3Zero, w, t);
+        vrphys_step(dt, turn, turnOff, anchor, kScale, true);
+        VrPhysEvent ev[8];
+        const int ne = vrphys_drain_events(ev, 8);
+        for (int e = 0; e < ne; e++) {
+            if (ev[e].type == VRPHYS_EV_CONTACT_BEGIN && impact == 0.0f) {
+                impact = ev[e].impact_mps;
+            }
+        }
+        const SlotState& sl = g_slots[VRPHYS_SLOT_WEAPON];
+        const V3 r0 = add(sl.pos_m, qrot(sl.quat, v3(d.grip_local_root_m)));
+        const V3 r1 = add(sl.pos_m, qrot(sl.quat, v3(d.grip_local_tip_m)));
+        const float bottom = fminf(r0.y, r1.y) - d.blade_radius_m;
+        if (bottom < minHeadBottom) {
+            minHeadBottom = bottom;
+        }
+        if (sl.contact_count > 0 && firstContact < 0) {
+            firstContact = step;
+        }
+        if (firstContact >= 0 && sl.contact_count == 0) {
+            zeroAfter++;
+        }
+        // Rest = the last second, once the swing's spring transient has settled.
+        if (step >= (int)(hz * 2.0f)) {
+            restSum += len(sub(r1, prevTip)) * 1000.0f;
+            restN++;
+        }
+        prevTip = r1;
+    }
+    printf("  HAMMER slam @%3.0fHz 4.9 m/s   | head lowest %6.1f mm vs floor (expect >= -~15) | "
+           "zero-contact after hit %d (expect 0) | rest HF %6.3f mm | impact %.2f\n",
+           hz, (minHeadBottom + 0.45f) * 1000.0f, zeroAfter, (float)(restSum / (restN ? restN : 1)),
+           impact);
+}
+
+// The weight a player FEELS: the lead wrist snaps 100 deg in 0.2 s (a hard swing) and stops dead.
+// Velocity feed-forward makes any spring track a steady rotation exactly, so heaviness comes from
+// the torque limit (max angular acceleration): how far the head trails mid-swing, how far its
+// momentum carries it past the stop, and how long it takes to settle.
+static void RunHeavySwingCase(const char* label, float angFreq, float zeta, float maxAngAccel) {
+    vrphys_reset();
+    const float turn[4] = { 0, 0, 0, 1 };
+    const float turnOff[3] = { 0, 0, 0 };
+    const float anchor[3] = { 0, 0, 0 };
+    vrphys_set_contact_prims(nullptr, 0);
+    VrPhysObjectDesc d = HammerDesc(angFreq, 12.0f, false, 0.0f);
+    d.ang_zeta = zeta;
+    d.max_ang_accel = maxAngAccel;
+    vrphys_set_object(VRPHYS_SLOT_WEAPON, &d);
+    const float dt = 1.0f / 90.0f;
+    uint64_t t = 0;
+    const float total = 100.0f * 3.14159265f / 180.0f;
+    const int swingSteps = 18; // 0.2 s
+    float theta = 0.0f;
+    float maxLag = 0.0f, overshoot = 0.0f, peakHeadMps = 0.0f;
+    int settleStep = -1;
+    for (int step = 0; step < 300; step++) {
+        const bool swinging = step < swingSteps;
+        // Smooth (sine-velocity) swing profile, like a real arm.
+        float rate = 0.0f;
+        if (swinging) {
+            rate = total / (swingSteps * dt) * 0.5f * 3.14159265f * sinf(3.14159265f * (step + 0.5f) / swingSteps);
+            theta += rate * dt;
+        }
+        const Q4 q = { 0, 0, sinf(theta * 0.5f), cosf(theta * 0.5f) };
+        t += (uint64_t)(dt * 1e9f);
+        PushHand(1, kV3Zero, q, kV3Zero, { 0, 0, rate }, t);
+        vrphys_step(dt, turn, turnOff, anchor, kScale, true);
+        const V3 handle = qrot(ObjQuat(), { 1, 0, 0 });
+        const float objTheta = atan2f(handle.y, handle.x);
+        const float lagDeg = (theta - objTheta) * 180.0f / 3.14159265f;
+        if (swinging && lagDeg > maxLag) {
+            maxLag = lagDeg;
+        }
+        if (!swinging && -lagDeg > overshoot) {
+            overshoot = -lagDeg;
+        }
+        if (!swinging && settleStep < 0 && fabsf(lagDeg) < 1.0f) {
+            // settled = first time inside 1 deg AND stays there for the rest of the run
+            settleStep = step;
+        } else if (settleStep >= 0 && fabsf(lagDeg) >= 1.0f) {
+            settleStep = -1;
+        }
+        const SlotState& sl = g_slots[VRPHYS_SLOT_WEAPON];
+        const float headMps = len(sl.ang_vel_rps) * kHammerHeadX;
+        if (headMps > peakHeadMps) {
+            peakHeadMps = headMps;
+        }
+    }
+    printf("  %-26s | trail %5.1f deg | overshoot %5.1f deg | settle %4.0f ms | peak head %4.1f m/s "
+           "(hand's head %4.1f)\n",
+           label, maxLag, overshoot, settleStep < 0 ? -1.0f : (settleStep - swingSteps) * dt * 1000.0f,
+           peakHeadMps, total / (swingSteps * dt) * 0.5f * 3.14159265f * kHammerHeadX);
+}
+
 int main() {
     struct Case {
         const char* name;
@@ -720,6 +1068,24 @@ int main() {
                thin.heldJitterMm, thin.minContacts, thin.maxContacts, thin.zeroContactSteps);
         RunWeightLagCase();
     }
+
+    printf("\n=== TWO-HANDED HOLD + HAMMER (Megaton Hammer) ===\n");
+    RunTwoHandAimCase();
+    RunTwoHandPinNoiseCase();
+    RunTwoHandGrabReleaseCase();
+    RunDroopCase();
+    RunHammerSlamCase(72.0f);
+    RunHammerSlamCase(90.0f);
+    RunHammerSlamCase(120.0f);
+    printf("  -- heavy-swing feel (100 deg wrist snap in 0.2 s, then stop) --\n");
+    RunHeavySwingCase("sword (30 Hz, z1, 3000)", 30.0f, 1.0f, 3000.0f);
+    RunHeavySwingCase("soft spring only (4 Hz)", 4.0f, 0.8f, 3000.0f);
+    RunHeavySwingCase("1H 6 Hz z.7 accel 60", 6.0f, 0.7f, 60.0f);
+    RunHeavySwingCase("1H 6 Hz z.7 accel 90", 6.0f, 0.7f, 90.0f);
+    RunHeavySwingCase("1H 5 Hz z.6 accel 70", 5.0f, 0.6f, 70.0f);
+    RunHeavySwingCase("2H 9 Hz z.8 accel 180", 9.0f, 0.8f, 180.0f);
+    RunHeavySwingCase("2H 9 Hz z.8 accel 250", 9.0f, 0.8f, 250.0f);
+    RunHeavySwingCase("2H 10 Hz z.85 accel 300", 10.0f, 0.85f, 300.0f);
 
     printf("\n=== FRICTION A/B (tip pressed on flat wall, hand drags sideways at 0.36 m/s) ===\n");
     const float frics[] = { 0.0f, 0.15f, 0.3f, 0.6f, 0.9f };

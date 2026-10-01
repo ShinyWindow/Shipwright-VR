@@ -110,17 +110,19 @@ bool SelectorModeInPlay() {
 // Which VR controller physically holds the current held item, or -1 when Link's hands are empty.
 // Link's L_HAND limb rides the sword-hand controller and R_HAND the other (the motion-hands limb
 // override in z_player_lib.c), so the live model-group hand types ARE the answer — no table of
-// items to keep in sync. Bow, slingshot, hookshot and the ocarinas are right-hand models, so they
-// sit in the OFF hand; sword, Deku stick, boomerang, hammer, bottle and every open-handed item
-// (bombs, nuts, magic) are left-hand models and sit in the sword hand.
+// items to keep in sync. Bow, slingshot and the ocarinas are right-hand models, so they sit in
+// the OFF hand; sword, Deku stick, boomerang, hammer, bottle and every open-handed item (bombs,
+// nuts, magic) are left-hand models and sit in the sword hand. The hookshot is a right-hand model
+// the limb override moves to the dominant hand (VrHookshot_RightLimbHand says where it is).
 int HeldItemVrHand(Player* player) {
     if (player == NULL || player->heldItemAction <= PLAYER_IA_NONE) {
         return -1;
     }
     switch (player->rightHandType) {
+        case PLAYER_MODELTYPE_RH_HOOKSHOT:
+            return VrHookshot_RightLimbHand(player);
         case PLAYER_MODELTYPE_RH_BOW_SLINGSHOT:
         case PLAYER_MODELTYPE_RH_BOW_SLINGSHOT_2:
-        case PLAYER_MODELTYPE_RH_HOOKSHOT:
         case PLAYER_MODELTYPE_RH_OCARINA:
         case PLAYER_MODELTYPE_RH_OOT:
             return SwordHand() ^ 1;
@@ -151,6 +153,12 @@ uint16_t SwapMask() {
 
 bool SwapChordHeld() {
     const uint16_t mask = SwapMask();
+    // A grip the hammer owns (the off hand taking or holding the handle) is not half of the
+    // chord: squeezing the handle while the lead hand grips must not stow the hammer.
+    if ((mask & VR_BTN_GRIP) && (VrHammer_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrHammer_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
+        return false;
+    }
     return mask != 0 && (VR_GetControllerButton(VR_HAND_LEFT) & mask) != 0 &&
            (VR_GetControllerButton(VR_HAND_RIGHT) & mask) != 0;
 }
@@ -668,9 +676,12 @@ extern "C" uint16_t VrItemSelect_TriggerItemMask(int32_t vrHand) {
     if (VrBoomerang_Covers(player) && VrBoomerang_TriggerStandsDown()) {
         return 0; // the pocket / the hand owns the boomerang; the trigger must not start the vanilla aim
     }
+    if (VrMagic_Covers(player) && !VrMagic_ChordHeld()) {
+        return 0; // spells cast on BOTH triggers: the chord is the button press (VrMagic.cpp)
+    }
     // Physical combat owns the weapons it covers: the swing IS the attack, so the sword hand's
-    // trigger stays idle rather than also emitting B. Weapons physical combat does NOT cover
-    // (Deku stick, hammer, Biggoron's) keep button attacks, so they keep the mirror.
+    // trigger stays idle rather than also emitting B. A weapon it does NOT cover (the hammer with
+    // gVrPhysHammer off) keeps button attacks, so it keeps the mirror.
     if (VrCombat_Active() && VrCombat_MeleeCovered(player)) {
         return 0;
     }

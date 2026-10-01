@@ -6390,6 +6390,8 @@ void func_8083AF44(PlayState* play, Player* this, s32 magicSpell) {
     //! consumed to a stale target value. If that stale target value is higher than the current
     //! magic value, it will be consumed to zero.
     Magic_RequestChange(play, sMagicSpellCosts[magicSpell], MAGIC_CONSUME_WAIT_PREVIEW);
+    // SOH [VR] A cast begun from the two-trigger chord owns its wind-up (cancel on release).
+    VrMagic_BeginCharge(play, this);
 
     u8 isFastFarores = CVarGetInteger(CVAR_ENHANCEMENT("FastFarores"), 0) && this->itemAction == PLAYER_IA_FARORES_WIND;
 
@@ -6752,7 +6754,8 @@ s32 func_8083BB20(Player* this) {
     // SOH [VR] Physical combat: for covered weapons, button attacks are replaced by real swings.
     // Every B attack (and with it combo chains, root motion and the stab lunge) originates from
     // this check, so suppressing it here retires the whole authored-attack state machine while
-    // the mode is active. Uncovered weapons (stick/hammer, for now) keep vanilla attacks.
+    // the mode is active. Uncovered weapons (the hammer with gVrPhysHammer off) keep vanilla
+    // attacks.
     if (VrCombat_Active() && VrCombat_MeleeCovered(this)) {
         return 0;
     }
@@ -9626,6 +9629,26 @@ void VrCombat_MeleeImpactConsume(PlayState* play, Player* this) {
     func_80842CF0(play, this);
 }
 
+// SOH [VR] Physical Megaton Hammer: the simulated head physically met the world hard enough to
+// count (VrSwing.cpp HammerContact decides from the head's real approach speed — no animation
+// frame). Floor = the ground pound of Player_Action_808502D0's frame-7 check: func_80842A28 (quake,
+// rumble, hammer hit sound, and actorCtx.unk_02 — the flag nearby actors read as "the hammer hit
+// the ground") plus the white shockwave, here at the actual impact point. Wall = func_80842DF4's
+// hammer branch minus the recoil action and its shove (VR comfort; the swing is the player's arm,
+// so there is no attack to end).
+void Player_VrHammerImpact(PlayState* play, Player* this, const float* pos, int32_t ground) {
+    static Vec3f zeroVec = { 0.0f, 0.0f, 0.0f };
+    Vec3f impactPos = { pos[0], pos[1], pos[2] };
+
+    if (!ground) {
+        func_80832630(play);
+    }
+    func_80842A28(play, this);
+    if (ground) {
+        EffectSsBlast_SpawnWhiteShockwave(play, &impactPos, &zeroVec, &zeroVec);
+    }
+}
+
 static LinkAnimationHeader* D_808545CC[] = {
     &gPlayerAnim_link_fighter_rebound,
     &gPlayerAnim_link_fighter_rebound_long,
@@ -12458,9 +12481,13 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
             // little, move a little; release, stop. This overrides whatever the (later-running)
             // action func eased into linearVelocity/yaw, so animations follow movement instead of
             // gating it. Grounded only — leaving a ledge keeps momentum until the air action takes
-            // over (which has its own VR steering).
+            // over (which has its own VR steering). Not while the hookshot is out (func_8008F128:
+            // extending or retracting): vanilla roots Link then — the shot zeroes his speed and
+            // Player_TryActionHandlerList returns before any locomotion runs — and this override
+            // must not walk him anyway.
             if (Player_VrDirectMovement(this) && Player_VrIsNeutralLocomotion(this) &&
-                !Player_InBlockingCsMode(play, this) && (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND)) {
+                !Player_InBlockingCsMode(play, this) && (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) &&
+                !func_8008F128(this)) {
                 f32 vrSpeedTarget;
                 s16 vrYawTarget;
 
@@ -16030,6 +16057,20 @@ static AnimSfxEntry D_80854A8C[][2] = {
 
 void Player_Action_808507F4(Player* this, PlayState* play) {
     u8 isFastFarores = CVarGetInteger(CVAR_ENHANCEMENT("FastFarores"), 0) && this->itemAction == PLAYER_IA_FARORES_WIND;
+
+    // SOH [VR] Two-trigger casting: the wind-up (magic_tame, actionVar2 == 0) builds on the
+    // controllers, and letting go of a trigger before it ends cancels the cast. Nothing is spent
+    // yet: the meter preview resets, the item camera ends (Din's cutscene camera through
+    // Player_SetupAction), Link idles and can move again.
+    if ((this->av1.actionVar1 >= 0) && (this->av2.actionVar2 == 0) &&
+        VrMagic_ChargeTick(play, this, this->skelAnime.curFrame / MAX(this->skelAnime.endFrame, 1.0f))) {
+        Magic_Reset(play);
+        func_80839FFC(this, play);
+        func_8005B1A4(Play_GetCamera(play, CAM_ID_MAIN));
+        Player_AnimChangeOnceMorph(play, this, Player_GetIdleAnim(this));
+        return;
+    }
+
     if (LinkAnimation_Update(play, &this->skelAnime)) {
         if (this->av1.actionVar1 < 0) {
             if ((this->itemAction == PLAYER_IA_NAYRUS_LOVE) || isFastFarores ||
@@ -16043,6 +16084,7 @@ void Player_Action_808507F4(Player* this, PlayState* play) {
                                                0.83f * (isFastFarores ? 2 : 1));
 
                 if (Player_SpawnMagicSpell(play, this, this->av1.actionVar1) != NULL) {
+                    VrMagic_OnCast(); // SOH [VR] the release burst
                     this->stateFlags1 |= PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE;
                     if ((this->av1.actionVar1 != 0) || (gSaveContext.respawn[RESPAWN_MODE_TOP].data <= 0)) {
                         gSaveContext.magicState = MAGIC_STATE_CONSUME_SETUP;

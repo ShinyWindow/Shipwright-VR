@@ -542,6 +542,44 @@ static void VrBoomerangReadout(WidgetInfo& info) {
                                                        : "missed, back to the pocket");
 }
 
+// Live state of the physical hammer: which hands hold it, the off hand's distance to the handle
+// against the reach, the simulated head's speed and swing tier, and what the head's last contact
+// counted as. The in-headset answer to "my off hand won't take the handle" and "I slammed the
+// floor and nothing happened".
+static void VrHammerReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    static const char* sGate[] = {
+        "ARMED",
+        "off (Physical Hammer unchecked)",
+        "hammer not in hand / physical combat inactive",
+    };
+    static const char* sTier[] = { "idle", "windup", "HOT (a hit lands)" };
+    VrHammerDebug d;
+    VrHammer_GetDebug(&d);
+    const int gate = (d.gate >= 0 && d.gate < 3) ? d.gate : 2;
+    ImGui::Text("Hammer: %s   (%s)", d.twoHand ? "TWO HANDS" : "one hand", sGate[gate]);
+    if (gate != 0) {
+        return;
+    }
+    if (d.offHandCm >= 0.0f) {
+        ImGui::Text("Off hand -> handle: %.0f cm (takes hold within %.0f)%s", d.offHandCm, d.reachCm,
+                    d.twoHand ? "" : (d.offInReach ? "   IN REACH: squeeze grip" : ""));
+    }
+    const int tier = (d.tier >= 0 && d.tier < 3) ? d.tier : 0;
+    ImGui::Text("Head speed: %.1f m/s   %s   (hits from %.1f)", d.headMps, sTier[tier], d.hitSpeed);
+    ImGui::Text("Last contact: %.1f m/s into the surface -> %s%s", d.lastImpactMps,
+                d.lastImpact < 0    ? "none yet"
+                : d.lastImpact == 1 ? "GROUND POUND"
+                : d.lastImpact == 2 ? "WALL STRIKE"
+                : d.lastImpact == 3 ? "body / object"
+                                    : "soft touch (below the pound speed)",
+                d.lastStrike == 2 ? ", heavy damage" : (d.lastStrike == 1 ? ", damage" : ""));
+    ImGui::Text("Pounds from %.1f m/s into a floor", d.poundSpeed);
+}
+
 void SohMenu::AddMenuVRSettings() {
     AddMenuEntry("VR Settings", CVAR_SETTING("Menu.VRSettingsSidebarSection"));
 
@@ -1703,6 +1741,212 @@ void SohMenu::AddMenuVRSettings() {
                               "Grip closed at that moment = caught into the hand; grip open = it "
                               "vanishes and the pocket shows it again."));
     AddWidget(devPath, "VrBoomerangReadout", WIDGET_CUSTOM).CustomFunction(VrBoomerangReadout).HideInSearch(true);
+    AddWidget(devPath, "Megaton Hammer", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Hammer", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysHammer")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("The hammer swings with your arms and has real weight: the head trails your "
+                              "hands and carries through, and it stops dead on walls, floors and bodies. "
+                              "One-handed it is slow and droops; squeeze grip with your other hand on the "
+                              "handle to hold it with both for control and power. Slam the head into the "
+                              "floor hard enough for the ground pound. Disable for the base game's button "
+                              "swings."));
+    AddWidget(devPath, "Hammer One-Hand Torque: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer1HAccel")
+        .Options(FloatSliderOptions()
+                     .Min(20.0f)
+                     .Max(600.0f)
+                     .DefaultValue(80.0f)
+                     .Step(5.0f)
+                     .Format("%.0f")
+                     .Tooltip("How hard one hand can spin the head up and stop it (rad/s^2). This is the "
+                              "weight: lower = the head trails further behind your hand and carries further "
+                              "past where you stop."));
+    AddWidget(devPath, "Hammer One-Hand Grip Stiffness: %.1f Hz", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer1HFreq")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(20.0f)
+                     .DefaultValue(6.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("How firmly one hand pulls the head back in line with the wrist. Lower = a "
+                              "looser, wobblier grip."));
+    AddWidget(devPath, "Hammer One-Hand Follow-Through: %.2f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer1HZeta")
+        .Options(FloatSliderOptions()
+                     .Min(0.3f)
+                     .Max(1.2f)
+                     .DefaultValue(0.7f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("Damping of the one-hand grip. Lower = the head swings past and rocks back "
+                              "when you stop; 1.0 and above = it settles without overshoot."));
+    AddWidget(devPath, "Hammer One-Hand Droop: %.1fx", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer1HDroop")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(8.0f)
+                     .DefaultValue(2.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Gravity on the head held in one hand, as a multiple of real gravity. Higher "
+                              "= the head sags lower when you hold the handle level."));
+    AddWidget(devPath, "Hammer Two-Hand Torque: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer2HAccel")
+        .Options(FloatSliderOptions()
+                     .Min(40.0f)
+                     .Max(1500.0f)
+                     .DefaultValue(200.0f)
+                     .Step(10.0f)
+                     .Format("%.0f")
+                     .Tooltip("How hard two hands can spin the head up and stop it (rad/s^2). Higher = "
+                              "quicker, more controlled swings."));
+    AddWidget(devPath, "Hammer Two-Hand Grip Stiffness: %.1f Hz", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer2HFreq")
+        .Options(FloatSliderOptions()
+                     .Min(3.0f)
+                     .Max(30.0f)
+                     .DefaultValue(9.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("How firmly two hands hold the head in line with the handle."));
+    AddWidget(devPath, "Hammer Two-Hand Follow-Through: %.2f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer2HZeta")
+        .Options(FloatSliderOptions()
+                     .Min(0.3f)
+                     .Max(1.2f)
+                     .DefaultValue(0.8f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("Damping of the two-hand grip. Lower = more swing-past when you stop."));
+    AddWidget(devPath, "Hammer Two-Hand Droop: %.1fx", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammer2HDroop")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(8.0f)
+                     .DefaultValue(1.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Gravity on the head held in both hands, as a multiple of real gravity."));
+    AddWidget(devPath, "Hammer Off-Hand Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerGripReach")
+        .Options(FloatSliderOptions()
+                     .Min(4.0f)
+                     .Max(25.0f)
+                     .DefaultValue(10.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close to the handle the off hand must be for a grip squeeze to take "
+                              "hold (a light tick marks entering reach). Inside this range the off hand's "
+                              "grip does nothing else."));
+    AddWidget(devPath, "Hammer Hit Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerHitSpeed")
+        .Options(FloatSliderOptions()
+                     .Min(1.0f)
+                     .Max(8.0f)
+                     .DefaultValue(3.0f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How fast the HEAD must be moving for a blow to deal damage (enemies, "
+                              "rusted switches, boulders). Measured on the simulated head, so its weight "
+                              "counts."));
+    AddWidget(devPath, "Hammer Heavy Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerHeavySpeed")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(12.0f)
+                     .DefaultValue(5.5f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("Head speed for the heavy blow (the base game's jump-attack hammer damage)."));
+    AddWidget(devPath, "Hammer Ground Pound Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerPoundSpeed")
+        .Options(FloatSliderOptions()
+                     .Min(0.5f)
+                     .Max(8.0f)
+                     .DefaultValue(2.5f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How fast the head must be moving INTO a floor for the ground pound "
+                              "(shockwave, quake, and the thump that flips Tektites and stuns scrubs). "
+                              "The same speed into a wall gives the base game's wall strike."));
+    AddWidget(devPath, "VrHammerReadout", WIDGET_CUSTOM).CustomFunction(VrHammerReadout).HideInSearch(true);
+    AddWidget(devPath, "Hookshot", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Hookshot in Dominant Hand", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrHookshotSwordHand")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Hold the hookshot / longshot in your sword hand (the right controller, or "
+                              "the left in left-handed mode): it aims where that controller points and "
+                              "its trigger fires it. Disable to keep it in the off hand with the bow."));
+    AddWidget(devPath, "Hookshot Laser Pointer", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrHookshotLaser")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("While the hookshot / longshot is in your hand, a thin beam shows exactly "
+                              "where the hook will fly, out to its reach. Green: the surface it ends on "
+                              "takes the hook. Red: the hook would bounce off. A beam that fades out "
+                              "means nothing is in reach."));
+    AddWidget(devPath, "Aim Along Hookshot Barrel", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrHookshotBarrelAim")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("The hook sits in the hookshot's barrel, turns with it, and flies exactly "
+                              "where the hookshot model points (the laser follows). Disable to aim along "
+                              "the controller's pointing ray instead. The sliders below fine-tune "
+                              "whichever is active - set them back to 0 when switching."));
+    AddWidget(devPath, "Hookshot Aim Pitch: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHookshotAimPitch")
+        .Options(FloatSliderOptions()
+                     .Min(-180.0f)
+                     .Max(180.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Tilt the hookshot's shot up (+) or down (-) relative to the controller. "
+                              "Hookshot only, added on top of Calibration > Weapon Aim Trim. The laser "
+                              "and reticle follow it."));
+    AddWidget(devPath, "Hookshot Aim Yaw: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHookshotAimYaw")
+        .Options(FloatSliderOptions()
+                     .Min(-180.0f)
+                     .Max(180.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Turn the hookshot's shot right (+) or left (-). Mirrored when the hookshot "
+                              "is in the left controller."));
+    AddWidget(devPath, "Hookshot Origin Right: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHookshotAimRight")
+        .Options(FloatSliderOptions()
+                     .Min(-100.0f)
+                     .Max(100.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Slide the point the hook launches from (and the laser starts at) to the "
+                              "right (+) or left (-) of the controller. Mirrored in the left controller."));
+    AddWidget(devPath, "Hookshot Origin Up: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHookshotAimUp")
+        .Options(FloatSliderOptions()
+                     .Min(-100.0f)
+                     .Max(100.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Raise (+) or lower (-) the hook's launch point relative to the controller."));
+    AddWidget(devPath, "Hookshot Origin Forward: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHookshotAimFwd")
+        .Options(FloatSliderOptions()
+                     .Min(-100.0f)
+                     .Max(100.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Push the hook's launch point forward (+) along the shot, e.g. out to the "
+                              "hookshot's tip, or back (-)."));
     AddWidget(devPath, "Slingshot & Bow", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Archery", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysArchery")
@@ -1714,7 +1958,7 @@ void SohMenu::AddMenuVRSettings() {
                               "with almost no draw cancels the shot and keeps the ammo. Disable "
                               "for the classic scheme (weapon-hand trigger draws and fires). "
                               "Shooting galleries and horseback keep their own controls."));
-    AddWidget(devPath, "Archery Nock Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+    AddWidget(devPath, "Slingshot Nock Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryNockRadius")
         .Options(FloatSliderOptions()
                      .Min(5.0f)
@@ -1722,8 +1966,8 @@ void SohMenu::AddMenuVRSettings() {
                      .DefaultValue(20.0f)
                      .Step(1.0f)
                      .Format("%.0f")
-                     .Tooltip("How close the string hand must be to the weapon hand to nock."));
-    AddWidget(devPath, "Nock Point Right: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+                     .Tooltip("How close the string hand must be to the slingshot's nock point to nock."));
+    AddWidget(devPath, "Slingshot Nock Point Right: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryAnchorRight")
         .Options(FloatSliderOptions()
                      .Min(-40.0f)
@@ -1734,7 +1978,7 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Moves the nock point (the marker you pinch) sideways in the weapon "
                               "hand's own frame, so it can sit on the visible string instead of "
                               "the controller. Mirrored automatically for left-handed mode."));
-    AddWidget(devPath, "Nock Point Up: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+    AddWidget(devPath, "Slingshot Nock Point Up: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryAnchorUp")
         .Options(FloatSliderOptions()
                      .Min(-40.0f)
@@ -1743,7 +1987,7 @@ void SohMenu::AddMenuVRSettings() {
                      .Step(0.5f)
                      .Format("%.1f")
                      .Tooltip("Moves the nock point along the weapon hand's up axis."));
-    AddWidget(devPath, "Nock Point Forward: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+    AddWidget(devPath, "Slingshot Nock Point Forward: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryAnchorFwd")
         .Options(FloatSliderOptions()
                      .Min(-40.0f)
@@ -1753,7 +1997,7 @@ void SohMenu::AddMenuVRSettings() {
                      .Format("%.1f")
                      .Tooltip("Moves the nock point along the weapon hand's pointing direction "
                               "(negative = toward you, where a slingshot pouch usually sits)."));
-    AddWidget(devPath, "Archery Minimum Draw: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+    AddWidget(devPath, "Slingshot Minimum Draw: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryMinDraw")
         .Options(FloatSliderOptions()
                      .Min(2.0f)
@@ -1774,7 +2018,7 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Size of the Deku Nut nock-point icon, as a percent of a normal "
                               "nut drop. Make it as tiny as you like; it still grows slightly "
                               "when your string hand is in pinch reach."));
-    AddWidget(devPath, "String Pull Visual Scale: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
+    AddWidget(devPath, "Slingshot Band Visual Scale: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryStringApex")
         .Options(FloatSliderOptions()
                      .Min(200.0f)
@@ -1785,6 +2029,63 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Calibrates how far the string visual stretches to reach your "
                               "pulling hand (model units at full scale). If the drawn string "
                               "overshoots your hand, raise this; if it falls short, lower it."));
+    AddWidget(devPath, "Fairy Bow", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Bow Nock Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBowNockRadius")
+        .Options(FloatSliderOptions()
+                     .Min(5.0f)
+                     .Max(40.0f)
+                     .DefaultValue(20.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close your string hand must be to the bowstring (the nut icon "
+                              "just behind your bow fist) to nock an arrow."));
+    AddWidget(devPath, "Bow Full Draw: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBowFullDraw")
+        .Options(FloatSliderOptions()
+                     .Min(20.0f)
+                     .Max(80.0f)
+                     .DefaultValue(45.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How far you pull the string back (past its resting spot) for a full "
+                              "draw: full power and the firm pulse in both hands. The string stops "
+                              "stretching a little past this. Shorter arms: lower it."));
+    AddWidget(devPath, "Bow Minimum Draw: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBowMinDraw")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(30.0f)
+                     .DefaultValue(8.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Letting go of the string with less draw than this puts the arrow "
+                              "away instead of firing - no arrow or magic is spent."));
+    AddWidget(devPath, "Bow Draw Sets Arrow Power", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBowDrawPower")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("A full draw fires the normal arrow; a partial draw fires a slower "
+                              "arrow that drops sooner. Disable to make every shot full power."));
+    AddWidget(devPath, "Bow Aims Along Draw", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBowAlign")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("While the string is drawn, the bow turns to point along the line "
+                              "from your string hand through the bow grip, so the arrow always "
+                              "points straight out of the bow wherever you pull. Your wrist's "
+                              "tilt is kept. Disable to keep the bow fixed to your controller."));
+    AddWidget(devPath, "Bow Arrow Position: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBowArrowOffset")
+        .Options(FloatSliderOptions()
+                     .Min(-80.0f)
+                     .Max(80.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Slides the nocked arrow along its own line so its back end sits "
+                              "on the drawn string. Positive = toward the bow, negative = back "
+                              "toward you. Only moves the model; the shot line is the same."));
     AddWidget(devPath, "Bottle", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Bottle Scooping", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysBottleScoop")
@@ -1934,6 +2235,17 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Time between sip buzzes while the bottle stays at your face. Two "
                               "of these after the first buzz is the swallow."));
     AddWidget(devPath, "VrBottlePourReadout", WIDGET_CUSTOM).CustomFunction(VrBottlePourReadout).HideInSearch(true);
+    AddWidget(devPath, "Magic", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Two-Trigger Spell Casting", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysMagicChord")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Din's Fire, Farore's Wind and Nayru's Love cast only while you hold "
+                              "BOTH triggers. Link plants his feet and both controllers buzz, "
+                              "building until the spell goes off with a strong jolt. Let go of "
+                              "either trigger before then and the spell fizzles: no magic spent, "
+                              "you can move again. Disable to cast with the one trigger of the "
+                              "hand holding the spell."));
     AddWidget(buttonsPath, "Selector Hand", WIDGET_CVAR_COMBOBOX)
         .CVar("gVrItemSelHand")
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrItemSelect", 1); })

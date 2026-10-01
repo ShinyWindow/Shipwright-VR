@@ -426,6 +426,7 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
                         VrItemSelect_SwapConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrItemThrow_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrBoomerang_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrHammer_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrArchery_PinchConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrCombat_AimTriggerConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx])) {
                         continue;

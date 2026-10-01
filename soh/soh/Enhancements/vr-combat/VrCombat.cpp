@@ -44,8 +44,9 @@ bool sProjTriggerPrev = false;
 
 int AimHand() {
     // The hand that aims held projectiles (see Player_VrAimHeldProjectile): the bow rides
-    // Link's RIGHT hand model, driven by the player's LEFT controller when right-handed.
-    return CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_RIGHT : VR_HAND_LEFT;
+    // Link's RIGHT hand model, driven by the player's LEFT controller when right-handed; the
+    // hookshot moves that limb to the dominant hand (VrHookshot_RightLimbHand).
+    return VrHookshot_RightLimbHand(gPlayState != NULL ? GET_PLAYER(gPlayState) : NULL);
 }
 
 // Once per 20 Hz game tick, right after the player actor updates (and after the tick's

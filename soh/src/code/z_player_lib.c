@@ -1522,6 +1522,28 @@ static s32 sVrHandInvertCulling = false;
 static MtxF sVrHandLimbMtxF[2];
 static s32 sVrHandLimbFrame[2] = { -1, -1 };
 
+// SOH [VR] The same weld for a matrix built outside the player draw (the nocked arrow): `mtx`
+// (the Mtx about to be emitted) was computed from `curMf16` (MtxF layout) this frame, against
+// this frame's snapshot of `vrHand`. False = no snapshot this frame; the caller's plain matrix
+// stands, exactly as before.
+s32 Player_VrWeldMtxToHand(PlayState* play, const void* mtx, s32 vrHand, const float* curMf16) {
+    MtxF vrInv;
+    MtxF vrLocal;
+    MtxF vrCur;
+
+    if (!(VR_IsInitialized() && VR_GetFirstPerson()) || (vrHand != VR_HAND_LEFT && vrHand != VR_HAND_RIGHT) ||
+        (sVrHandLimbFrame[vrHand] != (s32)play->state.frames)) {
+        return false;
+    }
+    for (s32 i = 0; i < 16; i++) {
+        vrCur.mf[i / 4][i % 4] = curMf16[i];
+    }
+    SkinMatrix_Invert(&sVrHandLimbMtxF[vrHand], &vrInv);
+    SkinMatrix_MtxFMtxFMult(&vrInv, &vrCur, &vrLocal);
+    VR_RegisterHandChildMatrix(mtx, vrHand, &vrLocal.mf[0][0]);
+    return true;
+}
+
 s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot,
                                                  void* thisx) {
     Player* this = (Player*)thisx;
@@ -1565,32 +1587,51 @@ s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex,
             return ret;
         }
         if (limbIndex == PLAYER_LIMB_L_HAND || limbIndex == PLAYER_LIMB_R_HAND) {
-            s32 leftHanded = CVarGetInteger("gVrLeftHanded", 0);
-            s32 swordHandVr = leftHanded ? VR_HAND_LEFT : VR_HAND_RIGHT;
-            s32 vrHand = (limbIndex == PLAYER_LIMB_L_HAND) ? swordHandVr : (swordHandVr ^ 1);
+            // R_HAND rides the off hand, except while it holds the hookshot, which goes to the
+            // dominant hand (VrHookshot_RightLimbHand swaps the limbs); L_HAND takes the other.
+            s32 rightLimbVr = VrHookshot_RightLimbHand(this);
+            s32 vrHand = (limbIndex == PLAYER_LIMB_R_HAND) ? rightLimbVr : (rightLimbVr ^ 1);
             // Default (right-handed) maps each controller to Link's OPPOSITE-side hand model; the
             // reflection that flips a mesh's handedness is per hand because it also mirrors held
             // items' face designs — the sword survives that, but the shield's crest reads as
-            // upside-down, so mirroring is toggleable per hand.
+            // upside-down, so mirroring is toggleable per hand. A limb on its own side's
+            // controller (left-handed mode, or the swapped hookshot) is never mirrored.
+            s32 limbSideVr = (limbIndex == PLAYER_LIMB_L_HAND) ? VR_HAND_LEFT : VR_HAND_RIGHT;
             s32 mirror;
-            if (limbIndex == PLAYER_LIMB_L_HAND) {
-                mirror = !leftHanded && CVarGetInteger("gVrHandMirrorSword", 1);
+            if (vrHand == limbSideVr) {
+                mirror = false;
+            } else if (limbIndex == PLAYER_LIMB_L_HAND) {
+                mirror = CVarGetInteger("gVrHandMirrorSword", 1);
             } else {
-                mirror = !leftHanded && CVarGetInteger("gVrHandMirrorShield", 1);
+                mirror = CVarGetInteger("gVrHandMirrorShield", 1);
             }
             VR_SetHandScale(this->actor.scale.x); // fold Link's model scale into the live hand matrix
             VR_SetHandMirror(vrHand, mirror);
             MtxF handMtx;
             if (VR_GetHandMatrix(vrHand, handMtx.mf)) {
+                // SOH [VR] Drawn Fairy Bow: the bow hand's matrix turns so the bow points along the
+                // string hand -> arrow rest line (VrArchery). It is then welded to the live hand
+                // as a CHILD (hand-local part vs. the raw pose) instead of being replaced by it.
+                MtxF vrRawHandMtx = handMtx;
+                s32 vrBowAligned = VrArchery_BowAlignedMatrix(vrHand, &handMtx.mf[0][0]);
                 Matrix_Put(&handMtx);
                 // Tag this limb's per-frame Mtx so the interpreter swaps in the LIVE controller pose
                 // per eye — the hand tracks at headset rate instead of the game-rate interpolation.
                 if (play->flexLimbOverrideMTX != NULL) {
-                    VR_RegisterHandMatrix((const void*)*play->flexLimbOverrideMTX, vrHand);
+                    if (vrBowAligned) {
+                        MtxF vrInv;
+                        MtxF vrLocal;
+                        SkinMatrix_Invert(&vrRawHandMtx, &vrInv);
+                        SkinMatrix_MtxFMtxFMult(&vrInv, &handMtx, &vrLocal);
+                        VR_RegisterHandChildMatrix((const void*)*play->flexLimbOverrideMTX, vrHand,
+                                                   &vrLocal.mf[0][0]);
+                    } else {
+                        VR_RegisterHandMatrix((const void*)*play->flexLimbOverrideMTX, vrHand);
+                    }
                 }
                 // Snapshot the 20 Hz pose this frame's derived matrices (bowstring) are built
                 // against, so their hand-LOCAL part can be extracted for live re-composition.
-                sVrHandLimbMtxF[vrHand] = handMtx;
+                sVrHandLimbMtxF[vrHand] = vrRawHandMtx;
                 sVrHandLimbFrame[vrHand] = (s32)play->state.frames;
                 pos->x = pos->y = pos->z = 0.0f;
                 rot->x = rot->y = rot->z = 0;
@@ -1924,19 +1965,22 @@ Vec3f sLeftRightFootLimbModelFootPos[] = {
 // influence (which writes the upstream focus.rot), so motion aim always wins the shot while
 // lock-on keeps steering the camera. The weapon (bow/slingshot/hookshot) models attach to Link's
 // RIGHT hand limb, which motion-hands maps to the player's LEFT controller in right-handed mode
-// (bow in left hand, draw with right) — so the aim ray comes from that controller.
-static void Player_VrAimHeldProjectile(Player* this, Actor* heldActor) {
+// (bow in left hand, draw with right) — so the aim ray comes from that controller. The hookshot
+// is the exception: it rides the dominant hand (VrHookshot_RightLimbHand), and aims from there.
+// Returns true when it overrode the actor's transform.
+static s32 Player_VrAimHeldProjectile(Player* this, Actor* heldActor) {
     if (!(VR_IsInitialized() && VR_GetFirstPerson() && CVarGetInteger("gVrMotionHands", 1) &&
           CVarGetInteger("gVrWeaponAim", 1))) {
-        return;
+        return false;
     }
-    s32 vrWeaponHand = CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_RIGHT : VR_HAND_LEFT;
+    s32 vrWeaponHand = VrHookshot_RightLimbHand(this);
     float vrRayPos[3];
     float vrRayDir[3];
     // SOH [VR] Physical archery: while a nock is pinched, the shot aims along the string-hand
     // -> bow-hand line — real two-hand archery — instead of the bow hand's pointing ray. Same
     // override mechanism either way; the flight code still reads world.rot verbatim at release.
     float vrArcherySeg[6];
+    s16 vrRoll = 0;
     if (VrArchery_AimSegment(vrArcherySeg)) {
         vrRayPos[0] = vrArcherySeg[0];
         vrRayPos[1] = vrArcherySeg[1];
@@ -1944,8 +1988,25 @@ static void Player_VrAimHeldProjectile(Player* this, Actor* heldActor) {
         vrRayDir[0] = vrArcherySeg[3];
         vrRayDir[1] = vrArcherySeg[4];
         vrRayDir[2] = vrArcherySeg[5];
+    } else if (Player_HoldsHookshot(this) && VrHookshot_BarrelAim()) {
+        // SOH [VR] Hookshot barrel aim: the caller just placed the hook with the vanilla in-hand
+        // transform (D_80126190 + the hook rotation) through the R_HAND limb matrix, which motion
+        // hands pins to the controller — i.e. seated in the hookshot model's barrel, pointing
+        // along it. That pose IS the aim; the roll is kept so the hook turns with the hookshot.
+        f32 vrCp = Math_CosS(heldActor->world.rot.x);
+        vrRayPos[0] = heldActor->world.pos.x;
+        vrRayPos[1] = heldActor->world.pos.y;
+        vrRayPos[2] = heldActor->world.pos.z;
+        vrRayDir[0] = vrCp * Math_SinS(heldActor->world.rot.y);
+        vrRayDir[1] = -Math_SinS(heldActor->world.rot.x);
+        vrRayDir[2] = vrCp * Math_CosS(heldActor->world.rot.y);
+        vrRoll = heldActor->world.rot.z;
+        VrHookshot_TrimAimRay(vrWeaponHand, vrRayPos, vrRayDir);
     } else if (!VR_GetAimRay(vrWeaponHand, vrRayPos, vrRayDir)) {
-        return;
+        return false;
+    } else if (Player_HoldsHookshot(this)) {
+        // SOH [VR] Hookshot-only aim trim (angle + launch point), on top of the shared trim.
+        VrHookshot_TrimAimRay(vrWeaponHand, vrRayPos, vrRayDir);
     }
     Vec3f vrOrigin = { vrRayPos[0], vrRayPos[1], vrRayPos[2] };
     Vec3f vrTarget = { vrRayPos[0] + vrRayDir[0] * 100.0f, vrRayPos[1] + vrRayDir[1] * 100.0f,
@@ -1953,8 +2014,45 @@ static void Player_VrAimHeldProjectile(Player* this, Actor* heldActor) {
     heldActor->world.pos = vrOrigin;
     heldActor->world.rot.x = Math_Vec3f_Pitch(&vrOrigin, &vrTarget);
     heldActor->world.rot.y = Math_Vec3f_Yaw(&vrOrigin, &vrTarget);
-    heldActor->world.rot.z = 0;
+    heldActor->world.rot.z = vrRoll;
     heldActor->shape.rot = heldActor->world.rot;
+    return true;
+}
+
+// SOH [VR] Put a matrix under Player_DrawHookshotReticle so its line test runs along the hook's
+// real flight line (from world.pos along world.rot, exactly what ArmsHook reads at the shot)
+// instead of the hand model's barrel. The reticle tests model points (-500, -100, 0..range) and
+// the range is in Link-scaled model units, so: axes = Link's scale x the flight frame, origin
+// shifted so the model point (-500, -100, 0) lands on the hook.
+static void Player_VrPutHookshotReticleFrame(Player* this, Actor* hook) {
+    MtxF mf;
+    f32 s = this->actor.scale.x;
+    f32 cp = Math_CosS(hook->world.rot.x);
+    f32 sp = Math_SinS(hook->world.rot.x);
+    f32 cy = Math_CosS(hook->world.rot.y);
+    f32 sy = Math_SinS(hook->world.rot.y);
+    Vec3f fwd = { cp * sy, -sp, cp * cy };
+    Vec3f right = { cy, 0.0f, -sy };
+    Vec3f up = { fwd.y * right.z - fwd.z * right.y, fwd.z * right.x - fwd.x * right.z,
+                 fwd.x * right.y - fwd.y * right.x };
+
+    mf.xx = right.x * s;
+    mf.yx = right.y * s;
+    mf.zx = right.z * s;
+    mf.wx = 0.0f;
+    mf.xy = up.x * s;
+    mf.yy = up.y * s;
+    mf.zy = up.z * s;
+    mf.wy = 0.0f;
+    mf.xz = fwd.x * s;
+    mf.yz = fwd.y * s;
+    mf.zz = fwd.z * s;
+    mf.wz = 0.0f;
+    mf.xw = hook->world.pos.x + (500.0f * right.x + 100.0f * up.x) * s;
+    mf.yw = hook->world.pos.y + (500.0f * right.y + 100.0f * up.y) * s;
+    mf.zw = hook->world.pos.z + (500.0f * right.z + 100.0f * up.z) * s;
+    mf.ww = 1.0f;
+    Matrix_Put(&mf);
 }
 
 void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s* rot, void* thisx) {
@@ -2118,10 +2216,34 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
                 s32 vrStringDone = false;
                 float vrStrPos[3];
                 float vrStrRot[4];
+                float vrBowNock[3];
+                // SOH [VR] Fairy Bow: exact string. The bow string DL is two limb-tip vertices
+                // at y = 1 (x = +-1483) and an apex at (360, -1160, +-10) — the nocking point.
+                // A linear map that keeps X and Z and replaces the Y column with
+                // v = (360*X - nock) / 1160 sends the apex exactly onto the nock and leaves the
+                // tips on the bow, at any pull angle, with no calibration slider.
+                if (stringData == &sBowStringData[0] && VrArchery_BowStringNock(vrBowNock)) {
+                    MtxF vrCur;
+                    MtxF vrInv;
+                    MtxF vrShear;
+                    Vec3f vrNockWorld = { vrBowNock[0], vrBowNock[1], vrBowNock[2] };
+                    Vec3f vrNockLocal;
+                    Matrix_Get(&vrCur);
+                    SkinMatrix_Invert(&vrCur, &vrInv);
+                    SkinMatrix_Vec3fMtxFMultXYZ(&vrInv, &vrNockWorld, &vrNockLocal);
+                    SkinMatrix_Clear(&vrShear);
+                    vrShear.mf[1][0] = (360.0f - vrNockLocal.x) / 1160.0f;
+                    vrShear.mf[1][1] = -vrNockLocal.y / 1160.0f;
+                    vrShear.mf[1][2] = -vrNockLocal.z / 1160.0f;
+                    Matrix_Mult(&vrShear, MTXMODE_APPLY);
+                    this->unk_858 = CLAMP(-vrNockLocal.y / 1160.0f, 0.0f, 1.0f);
+                    this->unk_85C = -0.5f;
+                    vrStringDone = true;
+                }
                 // The pulling hand is the STRING-hand controller, fetched directly —
                 // D_80160000 here is this R_HAND limb's own position (updated per limb at
                 // function entry), which is why an earlier version always stretched "up".
-                if (VrArchery_StringNocked() &&
+                if (!vrStringDone && VrArchery_StringNocked() &&
                     VR_GetHandPose(CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT, vrStrPos,
                                    vrStrRot)) {
                     MtxF vrCur;
@@ -2218,14 +2340,28 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
                     heldActor->shape.rot = heldActor->world.rot;
                     // SOH [VR] Motion aim: the hookshot hook launches from and along the weapon
                     // hand's aim ray (same override as arrows/seeds).
-                    Player_VrAimHeldProjectile(this, heldActor);
+                    s32 vrHookAimed = Player_VrAimHeldProjectile(this, heldActor) && Player_HoldsHookshot(this);
+                    f32 vrHookRange = ((this->heldItemAction == PLAYER_IA_HOOKSHOT) ? 38600.0f : 77600.0f) *
+                                      CVarGetFloat(CVAR_CHEAT("HookshotReachMultiplier"), 1.0f);
+                    if (vrHookAimed) {
+                        // SOH [VR] Hand the flight line to the laser (VrHookshot.cpp), with this
+                        // frame's hand snapshot so the beam can weld to the live hand.
+                        s32 vrHookHand = VrHookshot_RightLimbHand(this);
+                        VrHookshot_NoteAim(this, heldActor, vrHookHand,
+                                           (sVrHandLimbFrame[vrHookHand] == (s32)play->state.frames)
+                                               ? &sVrHandLimbMtxF[vrHookHand].mf[0][0]
+                                               : NULL,
+                                           vrHookRange * this->actor.scale.x);
+                    }
 
                     if (func_8002DD78(this) != 0) {
-                        Matrix_Translate(500.0f, 300.0f, 0.0f, MTXMODE_APPLY);
-                        Player_DrawHookshotReticle(
-                            play, this,
-                            ((this->heldItemAction == PLAYER_IA_HOOKSHOT) ? 38600.0f : 77600.0f) *
-                                CVarGetFloat(CVAR_CHEAT("HookshotReachMultiplier"), 1.0f));
+                        if (vrHookAimed) {
+                            // SOH [VR] The reticle traces the hook's real flight line.
+                            Player_VrPutHookshotReticleFrame(this, heldActor);
+                        } else {
+                            Matrix_Translate(500.0f, 300.0f, 0.0f, MTXMODE_APPLY);
+                        }
+                        Player_DrawHookshotReticle(play, this, vrHookRange);
                     }
                 }
             }

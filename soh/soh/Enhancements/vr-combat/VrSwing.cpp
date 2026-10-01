@@ -132,6 +132,10 @@ struct PendingStrike {
     Vec3f pos;
     Vec3f normal;
     uint32_t dmgFlags;
+    // Hammer strikes PIERCE the struck surface (a quad standing across it) instead of lying flat
+    // inside it: a blunt head stops ON a surface, and flat colliders there — the rusted switch's
+    // top tris — are only met by a quad that crosses their plane.
+    bool pierce;
 };
 PendingStrike sPendingStrikes[4];
 int sPendingStrikeCount = 0;
@@ -307,10 +311,11 @@ bool ActorIsLive(PlayState* play, Actor* target) {
 }
 
 // The per-tick puppet solve: every recorded limb vs the blade segment. Called from FeedMelee
-// with the effective (sim) blade endpoints, world units.
-void PuppetSolve(const Vec3f& base, const Vec3f& tip) {
+// with the effective (sim) blade endpoints, world units. radius < 0 = the blade's own thickness
+// (the hammer passes its head radius).
+void PuppetSolve(const Vec3f& base, const Vec3f& tip, float radius = -1.0f) {
     const float limbR = CVarGetFloat("gVrPhysLimbRadius", 9.0f);
-    const float bladeR = CVarGetFloat("gVrPhysBladeThickness", 0.4f) + 1.5f;
+    const float bladeR = radius >= 0.0f ? radius : CVarGetFloat("gVrPhysBladeThickness", 0.4f) + 1.5f;
     const float maxPush = CVarGetFloat("gVrPhysLimbPushMax", 22.0f);
     const Vec3f bladeDir = vnorm(vsub(tip, base));
     const float bladeLen = vdist(base, tip);
@@ -1009,6 +1014,371 @@ void RegisterQuad(PlayState* play, uint32_t dmgFlags, const Vec3f& newBase, cons
     CollisionCheck_SetAT(play, &play->colChkCtx, &quad->base);
 }
 
+// Physical strikes recorded last tick become damage now, hitting exactly the struck target via
+// TOUCH_NEAREST. A blade strike is a small quad lying just inside the surface at the impact point;
+// a hammer strike stands ACROSS the surface (6 units out to 8 in), so it also meets flat
+// colliders lying on the surface the head stopped on.
+void RegisterPendingStrikes(PlayState* play) {
+    for (int i = 0; i < sPendingStrikeCount && sQuadsUsed < kMaxQuads; i++) {
+        const PendingStrike& st = sPendingStrikes[i];
+        const Vec3f up = (st.normal.y > 0.9f || st.normal.y < -0.9f) ? Vec3f{ 1.0f, 0.0f, 0.0f }
+                                                                     : Vec3f{ 0.0f, 1.0f, 0.0f };
+        const Vec3f t1 = vnorm(vcross(st.normal, up));
+        const Vec3f t2 = vcross(st.normal, t1);
+        const Vec3f e1 = vscale(t1, 9.0f);
+        if (st.pierce) {
+            const Vec3f out = vadd(st.pos, vscale(st.normal, 6.0f));
+            const Vec3f in = vsub(st.pos, vscale(st.normal, 8.0f));
+            RegisterQuad(play, st.dmgFlags, vsub(out, e1), vadd(out, e1), vsub(in, e1), vadd(in, e1));
+            continue;
+        }
+        const Vec3f c = vsub(st.pos, vscale(st.normal, 6.0f)); // pushed inside the surface
+        const Vec3f e2 = vscale(t2, 9.0f);
+        RegisterQuad(play, st.dmgFlags, vsub(vsub(c, e1), e2), vsub(vadd(c, e1), e2), vadd(vsub(c, e1), e2),
+                     vadd(vadd(c, e1), e2));
+    }
+    sPendingStrikeCount = 0;
+}
+
+// ---- Megaton Hammer ----
+// Geometry in L_HAND model space, decoded from the hammer's own display lists
+// (gLinkAdultLeftHandHoldingHammerNear/FarDL in object_link_boy): the handle runs along +X
+// through the fist (butt verts at x = -940, axis height y = 375); the head is an octagonal drum
+// centred x = 1888 whose axis runs along Y — the flat striking face at y = +1157, a spike tip at
+// y = -584 — about 430 in radius. At Link's scale that is a head ~19 units out from the fist.
+constexpr float kHamHandleY = 375.0f;
+constexpr float kHamButtX = -940.0f;
+constexpr float kHamNeckX = 1400.0f; // top of the grabbable handle, just short of the head
+constexpr float kHamHeadX = 1888.0f;
+constexpr float kHamHeadZ = 5.0f;
+constexpr float kHamHeadR = 420.0f;
+// Collision capsule along the head axis: spike tip and face, each inset by the radius.
+constexpr float kHamAxisLo = -170.0f;
+constexpr float kHamAxisHi = 740.0f;
+constexpr float kHamHeadMidY = 0.5f * (kHamAxisLo + kHamAxisHi);
+// The vanilla hammer dmgFlags row (D_80854488 row 4) is DMG_HAMMER_SWING / DMG_HAMMER_JUMP. The
+// heavy class carries BOTH bits: enemies (whose bumpers take both) resolve the highest matching
+// bit — the jump damage — while swing-only targets still answer. The Fire Temple totem pieces
+// (BgHidanDalm) bump on DMG_HAMMER_SWING alone, so a jump-only heavy blow left them untouched.
+constexpr uint32_t kHammerDmg[2] = { 0x00000040, 0x40000040 };
+
+// This tick's simulated-head path. Drained in the player UPDATE (Swing_OnPlayerUpdate) rather
+// than at draw like the sword's, so the same tick's contact events can read the head's
+// pre-impact velocity from it. No XR frames step between the update and the draw, so it is the
+// same set of samples the draw would have drained.
+VrBladeSample sHammerPath[16];
+int sHammerPathCount = 0;
+float sHammerLastVel[3] = { 0.0f, 0.0f, 0.0f }; // newest sample of the previous snapshot
+int sPoundCooldown = 0;
+
+inline Vec3f ModelPt(float x, float y, float z) {
+    Vec3f m = { x, y, z };
+    Vec3f w;
+    Matrix_MultVec3f(&m, &w);
+    return w;
+}
+
+inline Vec3f SamplePt(const VrBladeSample& s, const Vec3f& local) {
+    const Q4 q = { s.quat[0], s.quat[1], s.quat[2], s.quat[3] };
+    return vadd(Vec3f{ s.gripPos[0], s.gripPos[1], s.gripPos[2] }, qrot(q, local));
+}
+
+// The hammer's half of the melee feed (same seam, same live hand matrix). What differs from a
+// blade: the head is HEAVY — soft, torque-limited orientation springs (firm when the off hand
+// holds the handle) plus gravity droop, so it trails the hands and carries through; it never
+// passes through anything; swing tiers read the SIMULATED head's speed (the weight itself is the
+// anti-wrist-flick rule); and the damage quads sweep the head's real cross-section — a face-first
+// blow moves the head along its own axis, where a swept axis line would have no area at all.
+void FeedHammer(PlayState* play, Player* player) {
+    const int hand = SwordHand();
+    float worldScale = VR_GetWorldScale();
+    if (worldScale < 1.0f) {
+        worldScale = 35.0f;
+    }
+
+    // World points through the live (served) hand matrix — mirroring and Link's scale included.
+    const Vec3f grip0 = ModelPt(0.0f, kHamHandleY, 0.0f);
+    const Vec3f butt0 = ModelPt(kHamButtX, kHamHandleY, 0.0f);
+    const Vec3f neck0 = ModelPt(kHamNeckX, kHamHandleY, 0.0f);
+    const Vec3f headLo0 = ModelPt(kHamHeadX, kHamAxisLo, kHamHeadZ);
+    const Vec3f headHi0 = ModelPt(kHamHeadX, kHamAxisHi, kHamHeadZ);
+    const Vec3f headC0 = ModelPt(kHamHeadX, kHamHeadMidY, kHamHeadZ);
+    const Vec3f headIn0 = ModelPt(kHamHeadX - kHamHeadR, kHamHeadMidY, kHamHeadZ);  // rim toward the fist
+    const Vec3f headOut0 = ModelPt(kHamHeadX + kHamHeadR, kHamHeadMidY, kHamHeadZ); // rim past the handle
+    const float headR = vdist(headC0, headOut0);
+    const Vec3f rimOff = vsub(headOut0, headC0); // world: along the handle, head radius long
+    const Vec3f axisDir = vnorm(vsub(headHi0, headLo0));
+
+    float effPosArr[3];
+    float effQuatArr[4];
+    const bool haveEff = VR_GetHandPose(hand, effPosArr, effQuatArr);
+    const Q4 effInv = qconj({ effQuatArr[0], effQuatArr[1], effQuatArr[2], effQuatArr[3] });
+    const Vec3f effPos = { effPosArr[0], effPosArr[1], effPosArr[2] };
+    auto local = [&](const Vec3f& w) { return qrot(effInv, vsub(w, effPos)); };
+
+    // ---- 1. The heavy head (held-object sim) ----
+    if (haveEff) {
+        const Vec3f buttL = local(butt0);
+        const Vec3f neckL = local(neck0);
+        const float buttArr[3] = { buttL.x, buttL.y, buttL.z };
+        const float neckArr[3] = { neckL.x, neckL.y, neckL.z };
+        VrCombat::Hammer_SetHandleLocal(buttArr, neckArr);
+
+        const VrCombat::HammerGrip& grip = VrCombat::Hammer_GetGrip();
+        const bool two = grip.twoHand;
+        const Vec3f loL = local(headLo0);
+        const Vec3f hiL = local(headHi0);
+        const Vec3f cL = local(headC0);
+        VrHeldObjectDesc desc = {};
+        desc.primaryHand = hand;
+        desc.secondaryHand = two ? grip.offHand : -1;
+        desc.linFreqHz = CVarGetFloat("gVrHammerLinFreq", 12.0f);
+        desc.linZeta = 1.0f;
+        // Weight = the torque limit: velocity feed-forward lets ANY spring track a steady swing
+        // exactly, so how heavy it feels is how fast the head can be spun up and stopped (suite:
+        // a hard 100-degree wrist snap trails ~35 deg and overshoots ~37 one-handed, ~5 two-handed).
+        desc.angFreqHz = two ? CVarGetFloat("gVrHammer2HFreq", 9.0f) : CVarGetFloat("gVrHammer1HFreq", 6.0f);
+        desc.angZeta = two ? CVarGetFloat("gVrHammer2HZeta", 0.8f) : CVarGetFloat("gVrHammer1HZeta", 0.7f);
+        desc.maxAngAccel = two ? CVarGetFloat("gVrHammer2HAccel", 200.0f) : CVarGetFloat("gVrHammer1HAccel", 80.0f);
+        desc.maxAccelMps2 = CVarGetFloat("gVrPhysMaxAccel", 400.0f);
+        desc.gripLocalRootM[0] = loL.x / worldScale;
+        desc.gripLocalRootM[1] = loL.y / worldScale;
+        desc.gripLocalRootM[2] = loL.z / worldScale;
+        desc.gripLocalTipM[0] = hiL.x / worldScale;
+        desc.gripLocalTipM[1] = hiL.y / worldScale;
+        desc.gripLocalTipM[2] = hiL.z / worldScale;
+        desc.bladeRadiusM = headR / worldScale; // a round capsule: the drum, not a flat blade
+        desc.touchToleranceM = CVarGetFloat("gVrPhysTouchTolerance", 0.3f) / worldScale;
+        desc.contactEnabled = 1;
+        desc.friction = CVarGetFloat("gVrHammerFriction", 0.6f);
+        desc.pivotOnly = 1;
+        desc.passthroughSpeedMps = 0.0f; // never cuts through: it stops dead on whatever it meets
+        desc.gripLocalSecondaryM[0] = grip.secondaryLocal[0] / worldScale;
+        desc.gripLocalSecondaryM[1] = grip.secondaryLocal[1] / worldScale;
+        desc.gripLocalSecondaryM[2] = grip.secondaryLocal[2] / worldScale;
+        desc.gripLocalComM[0] = cL.x / worldScale;
+        desc.gripLocalComM[1] = cL.y / worldScale;
+        desc.gripLocalComM[2] = cL.z / worldScale;
+        desc.gravityScale = two ? CVarGetFloat("gVrHammer2HDroop", 1.0f) : CVarGetFloat("gVrHammer1HDroop", 2.0f);
+        VR_PhysSetObject(VR_PHYS_SLOT_WEAPON, &desc);
+        PushContactPrims(play, player, headLo0, headHi0);
+        PuppetSolve(headLo0, headHi0, headR);
+
+        // Overlay outline: the head's side profile (the capsule the solver collides).
+        const Vec3f pts[5] = { vsub(headLo0, rimOff), vsub(headHi0, rimOff), vadd(headHi0, vscale(axisDir, headR)),
+                               vadd(headHi0, rimOff), vadd(headLo0, rimOff) };
+        for (int i = 0; i < 5; i++) {
+            sDebugBlade[i][0] = pts[i].x;
+            sDebugBlade[i][1] = pts[i].y;
+            sDebugBlade[i][2] = pts[i].z;
+        }
+        sDebugBladeValid = true;
+    } else {
+        VR_PhysSetObject(VR_PHYS_SLOT_WEAPON, NULL);
+        VR_PhysSetContactPrims(NULL, 0);
+        VR_PhysSetMeshRegion(NULL, 0.0f, 0);
+        sDebugBladeValid = false;
+    }
+
+    // ---- 2. Swing speed: the SIMULATED head, not the wrist ----
+    float headSpd = 0.0f;
+    for (int i = 0; i < sHammerPathCount; i++) {
+        const float* v = sHammerPath[i].midVelMps;
+        const float s = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        headSpd = s > headSpd ? s : headSpd;
+    }
+    if (sHammerPathCount == 0) {
+        float lin[3];
+        float ang[3];
+        if (VR_GetHandVelocity(hand, lin, ang)) {
+            headSpd = sqrtf(lin[0] * lin[0] + lin[1] * lin[1] + lin[2] * lin[2]);
+        }
+    }
+    sTickTipSpeed = headSpd;
+    sTickHandSpeed = headSpd;
+    const float armSpeed = CVarGetFloat("gVrHammerArmSpeed", 1.5f);
+    const float hitSpeed = CVarGetFloat("gVrHammerHitSpeed", 3.0f);
+    const float heavySpeed = CVarGetFloat("gVrHammerHeavySpeed", 5.5f);
+    const float reArmSpeed = CVarGetFloat("gVrPhysReArmSpeed", 0.8f);
+    if (sTier == TIER_IDLE) {
+        if (headSpd >= hitSpeed) {
+            sTier = TIER_HOT;
+        } else if (headSpd >= armSpeed) {
+            sTier = TIER_ARMED;
+        }
+    } else {
+        if (sTier == TIER_ARMED && headSpd >= hitSpeed) {
+            sTier = TIER_HOT;
+        }
+        if (headSpd < reArmSpeed) {
+            sTier = TIER_IDLE;
+        }
+    }
+    VrCombat::Hammer_NoteSwing(headSpd, sTier);
+
+    // ---- 3. Mirror the melee state (enemy windup AI, swing SFX — the hammer's own whoosh) ----
+    // The animation id must read as a HAMMER attack: the Fire Temple totem pieces (BgHidanDalm)
+    // only break when meleeWeaponAnimation is HAMMER_FORWARD or HAMMER_SIDE at the moment they
+    // read their AC hit — a tick after the blow, when the stopped head may already be idle — so
+    // it is held for as long as the hammer is out, never reset to a sword value. Overhead blows
+    // report FORWARD, everything else SIDE (the only other readers, the sign's cut shape and
+    // spin-attack checks at >= 24, see nothing unusual either way).
+    {
+        float vy = 0.0f;
+        float vh = 0.0f;
+        float best = 0.0f;
+        for (int i = 0; i < sHammerPathCount; i++) {
+            const float* v = sHammerPath[i].midVelMps;
+            const float s = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+            if (s > best) {
+                best = s;
+                vy = fabsf(v[1]);
+                vh = sqrtf(v[0] * v[0] + v[2] * v[2]);
+            }
+        }
+        if (best > 0.0f) {
+            player->meleeWeaponAnimation = (vy > vh) ? PLAYER_MWA_HAMMER_FORWARD : PLAYER_MWA_HAMMER_SIDE;
+        } else if (player->meleeWeaponAnimation != PLAYER_MWA_HAMMER_FORWARD &&
+                   player->meleeWeaponAnimation != PLAYER_MWA_HAMMER_SIDE) {
+            player->meleeWeaponAnimation = PLAYER_MWA_HAMMER_FORWARD;
+        }
+    }
+    if (sTier == TIER_IDLE) {
+        player->meleeWeaponState = 0;
+    } else {
+        VrCombat_SetMeleeWeaponState(player, (sTier == TIER_HOT) ? 1 : -1);
+    }
+
+    // ---- 4. Trail: grip to the far rim of the head, like the vanilla hammer's ----
+    if (sTier != TIER_IDLE) {
+        if (func_80090480(play, NULL, &player->meleeWeaponInfo[0], const_cast<Vec3f*>(&headOut0),
+                          const_cast<Vec3f*>(&grip0)) &&
+            !CVarGetInteger(CVAR_ENHANCEMENT("DisableLinkSwordTrail"), 0)) {
+            EffectBlure_AddVertex((EffectBlure*)Effect_GetByIndex(player->meleeWeaponEffectIndex),
+                                  &player->meleeWeaponInfo[0].tip, &player->meleeWeaponInfo[0].base);
+        }
+    } else {
+        player->meleeWeaponInfo[0].active = 0;
+        player->meleeWeaponInfo[1].active = 0;
+        player->meleeWeaponInfo[2].active = 0;
+    }
+
+    // ---- 5. Damage ----
+    sQuadsUsed = 0;
+    RegisterPendingStrikes(play);
+    if (sTier == TIER_HOT) {
+        const uint32_t dmgFlags = kHammerDmg[headSpd >= heavySpeed ? 1 : 0];
+        if (sHammerPathCount >= 2 && haveEff) {
+            // The head's cross-line (through the drum centre, along the handle) swept between
+            // simulated samples: a face-first blow sweeps it broadside.
+            const Vec3f inL = local(headIn0);
+            const Vec3f outL = local(headOut0);
+            int segments = sHammerPathCount - 1;
+            if (segments > kMaxQuads - 2) {
+                segments = kMaxQuads - 2;
+            }
+            int prevIdx = 0;
+            for (int k = 1; k <= segments; k++) {
+                const int idx = (k * (sHammerPathCount - 1)) / segments;
+                if (idx <= prevIdx) {
+                    continue;
+                }
+                RegisterQuad(play, dmgFlags, SamplePt(sHammerPath[idx], inL), SamplePt(sHammerPath[idx], outL),
+                             SamplePt(sHammerPath[prevIdx], inL), SamplePt(sHammerPath[prevIdx], outL));
+                prevIdx = idx;
+            }
+        } else if (sHaveBladePrev) {
+            RegisterQuad(play, dmgFlags, headIn0, headOut0, sPrevBase[0], sPrevTip[0]);
+        }
+        // ...plus the head's side profile at the current pose (the blade's "stab quad").
+        RegisterQuad(play, dmgFlags, vsub(headLo0, rimOff), vsub(headHi0, rimOff), vadd(headLo0, rimOff),
+                     vadd(headHi0, rimOff));
+    }
+    sPrevTip[0] = headOut0;
+    sPrevBase[0] = headIn0;
+    sHaveBladePrev = true;
+    // Consumed (a draw without an update — the pause screen — must not replay it). The newest
+    // head velocity stays behind for a contact on the very first step of the next window.
+    if (sHammerPathCount > 0) {
+        memcpy(sHammerLastVel, sHammerPath[sHammerPathCount - 1].midVelMps, sizeof(sHammerLastVel));
+    }
+    sHammerPathCount = 0;
+}
+
+// A contact event of the hammer's head (drained in the player update). The approach speed is the
+// simulated head's velocity INTO the surface just before it touched — the sample of the contact
+// step itself already carries the stop. Enough of it on a floor = the vanilla ground pound; on a
+// wall = the vanilla wall strike (thud, quake, hit-stop — no recoil shove); into anything at hit
+// speed = a piercing strike that lands the hammer's damage on exactly what it struck.
+void HammerContact(PlayState* play, Player* player, const VrContactEvent& ev) {
+    const Vec3f n = { ev.normal[0], ev.normal[1], ev.normal[2] };
+    auto into = [&](const float* v) { return -(v[0] * n.x + v[1] * n.y + v[2] * n.z); };
+    float approach = 0.0f;
+    int before = 0;
+    for (int i = sHammerPathCount - 1; i >= 0 && before < 2; i--) {
+        if (sHammerPath[i].timeNs >= ev.timeNs) {
+            continue;
+        }
+        const float a = into(sHammerPath[i].midVelMps);
+        approach = a > approach ? a : approach;
+        before++;
+    }
+    if (before == 0) {
+        approach = into(sHammerLastVel); // contact on the first step of this tick's window
+    }
+    approach = approach > 0.0f ? approach : 0.0f;
+
+    const int kind = PrimKind(ev.primId);
+    const float hitSpeed = CVarGetFloat("gVrHammerHitSpeed", 3.0f);
+    const float heavySpeed = CVarGetFloat("gVrHammerHeavySpeed", 5.5f);
+    const float poundSpeed = CVarGetFloat("gVrHammerPoundSpeed", 2.5f);
+    int strike = 0;
+    if (approach >= hitSpeed && sPendingStrikeCount < 4) {
+        strike = approach >= heavySpeed ? 2 : 1;
+        PendingStrike& st = sPendingStrikes[sPendingStrikeCount++];
+        st.pos = { ev.pos[0], ev.pos[1], ev.pos[2] };
+        st.normal = n;
+        st.dmgFlags = kHammerDmg[strike - 1];
+        st.pierce = true;
+    }
+
+    const VrCombat::HammerGrip& grip = VrCombat::Hammer_GetGrip();
+    int result = 0;
+    if (kind == kPrimKindFlesh) {
+        result = 3; // a body: the strike is the whole answer (vanilla damage reactions and sounds)
+    } else if (kind == kPrimKindHard) {
+        // Armor, carapaces, shields: a blunt clang off the hard surface, as the sword path does.
+        result = 3;
+        if (approach > 0.4f) {
+            Vec3f pos = { ev.pos[0], ev.pos[1], ev.pos[2] };
+            const int detail = PrimDetail(ev.primId);
+            if (detail == COLTYPE_WOOD || detail == COLTYPE_TREE) {
+                CollisionCheck_SpawnShieldParticlesWood(play, &pos, &player->actor.projectedPos);
+            } else {
+                CollisionCheck_SpawnShieldParticlesMetalSound(play, &pos, &player->actor.projectedPos);
+            }
+        }
+    } else if (approach >= poundSpeed && sPoundCooldown == 0) {
+        const bool ground = n.y >= CVarGetFloat("gVrHammerFloorNormal", 0.6f);
+        Player_VrHammerImpact(play, player, ev.pos, ground ? 1 : 0);
+        sPoundCooldown = 8; // one pound per blow: a bouncing head must not re-fire it
+        // Felt through the whole handle: both hands when both hold it.
+        float amp = 0.7f + 0.06f * approach;
+        amp = amp > 1.0f ? 1.0f : amp;
+        float ms = 70.0f + 15.0f * approach;
+        ms = ms > 180.0f ? 180.0f : ms;
+        VR_TriggerHaptic(SwordHand(), amp, 0.0f, ms);
+        if (grip.twoHand && grip.offHand >= 0) {
+            VR_TriggerHaptic(grip.offHand, amp, 0.0f, ms);
+        }
+        result = ground ? 1 : 2;
+    } else if (approach > 0.8f) {
+        // Set down firmly but short of a pound: a dull knock, no quake.
+        Player_PlaySfx(&player->actor, NA_SE_IT_WALL_HIT_SOFT);
+    }
+    VrCombat::Hammer_NoteImpact(approach, result, strike);
+}
+
 } // namespace
 
 extern "C" bool VrCombat_MeleeCovered(Player* player) {
@@ -1016,11 +1386,12 @@ extern "C" bool VrCombat_MeleeCovered(Player* player) {
         return false; // co-op partner keeps vanilla behavior
     }
     const s32 held = Player_GetMeleeWeaponHeld(player);
-    // 1 = Master, 2 = Kokiri, 3 = Biggoron/Giant's Knife (physical now, one-hand feel until the
-    // two-hand milestone gives it real weight), 4 = Deku stick (physical: swings, wood SFX,
-    // breaks on landed impacts; world collision optional via gVrPhysStickCollision),
-    // 5 = hammer (still vanilla until its two-hand milestone).
-    return (held == 1) || (held == 2) || (held == 3) || (held == 4);
+    // 1 = Master, 2 = Kokiri, 3 = Biggoron/Giant's Knife (physical, one-hand feel), 4 = Deku
+    // stick (physical: swings, wood SFX, breaks on landed impacts; world collision optional via
+    // gVrPhysStickCollision), 5 = Megaton Hammer (physical: heavy simulated head, two-hand grip,
+    // ground pound — FeedHammer / VrHammer.cpp; gVrPhysHammer off = vanilla button combat).
+    return (held == 1) || (held == 2) || (held == 3) || (held == 4) ||
+           (held == 5 && CVarGetInteger("gVrPhysHammer", 1));
 }
 
 extern "C" bool VrCombat_MeleeQuadsHit(void) {
@@ -1037,6 +1408,18 @@ extern "C" bool VrCombat_MeleeQuadsHit(void) {
 
 extern "C" void VrCombat_FeedMelee(PlayState* play, Player* player) {
     EnsureQuads(play, player);
+
+    // A weapon change invalidates the sparse-tick fallback line (it belongs to the old weapon).
+    static s32 sLastHeld = -1;
+    const s32 heldNow = Player_GetMeleeWeaponHeld(player);
+    if (heldNow != sLastHeld) {
+        sLastHeld = heldNow;
+        sHaveBladePrev = false;
+    }
+    if (heldNow == 5) {
+        FeedHammer(play, player);
+        return;
+    }
 
     // Blade geometry through the live (controller) matrix: ONE line from hilt to visual tip.
     // The vanilla collider fattens this considerably (edge lines extended ~12 units past the tip
@@ -1292,21 +1675,7 @@ extern "C" void VrCombat_FeedMelee(PlayState* play, Player* player) {
     // the intent blade is reconstructed along the raw hand path as before.
     sQuadsUsed = 0;
 
-    // Physical strikes recorded last tick become damage now: a small quad poked through the
-    // surface at each impact point, hitting exactly the struck target via TOUCH_NEAREST.
-    for (int i = 0; i < sPendingStrikeCount && sQuadsUsed < kMaxQuads; i++) {
-        const PendingStrike& st = sPendingStrikes[i];
-        const Vec3f up = (st.normal.y > 0.9f || st.normal.y < -0.9f) ? Vec3f{ 1.0f, 0.0f, 0.0f }
-                                                                     : Vec3f{ 0.0f, 1.0f, 0.0f };
-        const Vec3f t1 = vnorm(vcross(st.normal, up));
-        const Vec3f t2 = vcross(st.normal, t1);
-        const Vec3f c = vsub(st.pos, vscale(st.normal, 6.0f)); // pushed inside the surface
-        const Vec3f e1 = vscale(t1, 9.0f);
-        const Vec3f e2 = vscale(t2, 9.0f);
-        RegisterQuad(play, st.dmgFlags, vsub(vsub(c, e1), e2), vsub(vadd(c, e1), e2), vadd(vsub(c, e1), e2),
-                     vadd(vadd(c, e1), e2));
-    }
-    sPendingStrikeCount = 0;
+    RegisterPendingStrikes(play);
 
     VrBladeSample bladePath[16];
     const int bladeN = inertiaOn ? VR_PhysGetBladePath(VR_PHYS_SLOT_WEAPON, bladePath, 16) : 0;
@@ -1421,12 +1790,28 @@ void Swing_OnPlayerUpdate(PlayState* play, Player* player) {
         VR_PhysSetContactPrims(NULL, 0);
     }
 
+    // The hammer drains its simulated-head path HERE (see sHammerPath) and runs its grip tick.
+    const bool hammer = VrCombat_MeleeCovered(player) && Player_GetMeleeWeaponHeld(player) == 5;
+    if (hammer) {
+        sHammerPathCount = VR_PhysGetBladePath(VR_PHYS_SLOT_WEAPON, sHammerPath, 16);
+    } else {
+        sHammerPathCount = 0;
+    }
+    if (sPoundCooldown > 0) {
+        sPoundCooldown--;
+    }
+    VrCombat::Hammer_Tick(play, player);
+
     // Contact events from the sim: impact SFX + sparks at the contact point (the matching
     // haptics already fired VR-side with zero latency).
     VrContactEvent events[8];
     const int eventCount = VR_PhysDrainEvents(events, 8);
     for (int i = 0; i < eventCount; i++) {
         if (events[i].type != VR_PHYS_EV_CONTACT_BEGIN || events[i].slot != VR_PHYS_SLOT_WEAPON) {
+            continue;
+        }
+        if (hammer) {
+            HammerContact(play, player, events[i]);
             continue;
         }
         Vec3f pos = { events[i].pos[0], events[i].pos[1], events[i].pos[2] };
@@ -1467,6 +1852,7 @@ void Swing_OnPlayerUpdate(PlayState* play, Player* player) {
             st.pos = pos;
             st.normal = { events[i].normal[0], events[i].normal[1], events[i].normal[2] };
             st.dmgFlags = kDmgFlags[(row < 0 || row > 3) ? 1 : row][sTickTipSpeed >= heavySpeed ? 1 : 0];
+            st.pierce = false;
             // A stick whacked into the world at attack speed snaps exactly like a vanilla
             // wall hit (func_80842DF4's wall branch -> break). Stick only here: durability
             // for actor hits is consumed once at the quad readback below, and a wall strike
@@ -1543,6 +1929,10 @@ void Swing_OnPlayerUpdate(PlayState* play, Player* player) {
         // heavy swing thumps long and hard.
         const float amp = 0.45f + 0.09f * sTickTipSpeed;
         VR_TriggerHaptic(SwordHand(), amp > 1.0f ? 1.0f : amp, 0.0f, 45.0f + 12.0f * sTickTipSpeed);
+        const VrCombat::HammerGrip& hammerGrip = VrCombat::Hammer_GetGrip();
+        if (hammer && hammerGrip.twoHand && hammerGrip.offHand >= 0) {
+            VR_TriggerHaptic(hammerGrip.offHand, amp > 1.0f ? 1.0f : amp, 0.0f, 45.0f + 12.0f * sTickTipSpeed);
+        }
         if (sTier == TIER_HOT) {
             sTier = TIER_ARMED; // one strike per swing: re-cross the hit speed to strike again
         }
@@ -1613,6 +2003,9 @@ void Swing_Deactivate(PlayState* play, Player* player) {
     sHaveBladePrev = false;
     sPendingStrikeCount = 0;
     sDebugBladeValid = false;
+    sHammerPathCount = 0;
+    sPoundCooldown = 0;
+    VrCombat::Hammer_Reset();
     // Drop the puppets: the skelanime warp hooks keep running while combat is off and match
     // by actor pointer, so a limb displaced at the moment of deactivation would otherwise
     // stay warped forever (nothing solves or decays the offsets anymore).
