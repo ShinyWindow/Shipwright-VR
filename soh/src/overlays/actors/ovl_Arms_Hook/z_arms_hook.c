@@ -2,6 +2,7 @@
 #include "objects/object_link_boy/object_link_boy.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -332,7 +333,11 @@ void ArmsHook_Draw(Actor* thisx, PlayState* play) {
             CVarGetInteger(CVAR_ENHANCEMENT("ScaleAdultEquipmentAsChild"), 0) && LINK_IS_CHILD) {
             Matrix_Scale(0.8, 0.8, 0.8, MTXMODE_APPLY);
         }
-        gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        // SOH [VR] While idle in the hand, the hook (and below, its chain stub) is welded to the
+        // live controller pose instead of trailing the hookshot at the 20 Hz tick (no-op otherwise).
+        Mtx* vrTipMtx = MATRIX_NEWMTX(play->state.gfxCtx);
+        VrHookshot_WeldIdleHook(&this->actor, vrTipMtx);
+        gSPMatrix(POLY_OPA_DISP++, vrTipMtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
         if (GameInteractor_Should(VB_DRAW_HOOKSHOT_TIP, true, player, play)) {
             gSPDisplayList(POLY_OPA_DISP++, gLinkAdultHookshotTipDL);
         }
@@ -348,7 +353,9 @@ void ArmsHook_Draw(Actor* thisx, PlayState* play) {
         } else {
             Matrix_Scale(0.015f, 0.015f, sqrtf(SQ(sp78.y) + sp58) * 0.01f, MTXMODE_APPLY);
         }
-        gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        Mtx* vrChainMtx = MATRIX_NEWMTX(play->state.gfxCtx);
+        VrHookshot_WeldIdleHook(&this->actor, vrChainMtx); // SOH [VR]
+        gSPMatrix(POLY_OPA_DISP++, vrChainMtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
         if (GameInteractor_Should(VB_DRAW_HOOKSHOT_CHAIN, true, player, play)) {
             gSPDisplayList(POLY_OPA_DISP++, gLinkAdultHookshotChainDL);
         }
