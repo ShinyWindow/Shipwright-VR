@@ -11,6 +11,7 @@ extern "C" {
 #include "macros.h"
 #include "functions.h"
 extern PlayState* gPlayState;
+extern SaveContext gSaveContext;
 }
 
 namespace {
@@ -107,6 +108,27 @@ extern "C" bool VrCombat_AimTriggerConsumed(int32_t vrHand, uint16_t vrBtnMask) 
     }
     Player* player = GET_PLAYER(gPlayState);
     return player != NULL && (player->stateFlags1 & PLAYER_STATE1_READY_TO_FIRE);
+}
+
+extern "C" float VrHand_ScaleFactor(void) {
+    if (!VR_IsInitialized() || !CVarGetInteger("gVrRealHandScale", 1)) {
+        return 1.0f;
+    }
+    const float ws = VR_GetWorldScale();
+    if (ws < 1.0f) {
+        return 1.0f;
+    }
+    // Open hand, wrist to fingertip, at Link's 0.01 scale: adult 862 model units = 8.62 game units
+    // (gLinkAdultLeftHandNearDL), child 548 = 5.48 (gLinkChildLeftHandNearDL). Drawn at the
+    // age's size in real centimetres it is units x factor game units = cm / 100 x ws.
+    const bool child = gSaveContext.linkAge != 0;
+    const float handUnits = child ? 5.48f : 8.62f;
+    const float cm = child ? CVarGetFloat("gVrHandSizeCmChild", 23.0f) : CVarGetFloat("gVrHandSizeCm", 23.0f);
+    return (cm * 0.01f * ws) / handUnits;
+}
+
+extern "C" bool VrHand_ChildSized(void) {
+    return gSaveContext.linkAge != 0;
 }
 
 extern "C" bool VrCombat_Active(void) {

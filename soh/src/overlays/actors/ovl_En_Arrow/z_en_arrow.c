@@ -569,6 +569,15 @@ void EnArrow_Draw(Actor* thisx, PlayState* play) {
         s32 vrWeld = (this->actor.parent == &vrPlayer->actor) && (vrPlayer->heldActor == &this->actor) &&
                      (VrArchery_NockedArrowHand() >= 0);
         Gfx_SetupDL_25Opa(play->state.gfxCtx);
+        if (vrWeld) {
+            // SOH [VR] Real-life hand scale: the nocked arrow is sized with the bow, about its nock
+            // end (actor-local model units (-1, 0, -1003), see VrArchery kArrowNockBack) so it
+            // stays on the string. The flight that follows release is the world-sized actor.
+            f32 vrS = VrHand_ScaleFactor();
+            Matrix_Translate(-1.0f, 0.0f, -1003.0f, MTXMODE_APPLY);
+            Matrix_Scale(vrS, vrS, vrS, MTXMODE_APPLY);
+            Matrix_Translate(1.0f, 0.0f, 1003.0f, MTXMODE_APPLY);
+        }
         SkelAnime_DrawLod(play, this->skelAnime.skeleton, this->skelAnime.jointTable,
                           vrWeld ? EnArrow_VrWeldLimbDraw : NULL, NULL, this,
                           (this->actor.projectedPos.z < MREG(95)) ? 0 : 1);

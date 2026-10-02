@@ -1429,49 +1429,45 @@ void Play_Draw(PlayState* play) {
             // Link's facing. All offsets are GAME UNITS applied to the anchor, so they interact with
             // world scale the physically-correct way: a lower head really does bring the ground
             // closer, by exactly offset/worldScale meters.
+            // The offset is swept from the body's center at eye height against the same walls (and
+            // wall radius) that stop the body, and only ever shortens toward that center: facing a
+            // wall, the eye pulls back into Link instead of poking past his collision.
             {
                 f32 vrHeadFwd = CVarGetFloat("gVrHeadOffsetForward", 6.0f);
                 f32 vrHeadSide = CVarGetFloat("gVrHeadOffsetSide", 0.0f);
                 if (vrHeadFwd != 0.0f || vrHeadSide != 0.0f) {
                     s16 vrBodyYaw = vrPlayer->actor.shape.rot.y;
-                    vrHead.x += Math_SinS(vrBodyYaw) * vrHeadFwd - Math_CosS(vrBodyYaw) * vrHeadSide;
-                    vrHead.z += Math_CosS(vrBodyYaw) * vrHeadFwd + Math_SinS(vrBodyYaw) * vrHeadSide;
+                    f32 vrOffX = Math_SinS(vrBodyYaw) * vrHeadFwd - Math_CosS(vrBodyYaw) * vrHeadSide;
+                    f32 vrOffZ = Math_CosS(vrBodyYaw) * vrHeadFwd + Math_SinS(vrBodyYaw) * vrHeadSide;
+                    f32 vrOffLenSq = SQ(vrOffX) + SQ(vrOffZ);
+                    Vec3f vrCamFrom = vrPlayer->actor.world.pos;
+                    Vec3f vrCamTo = { vrCamFrom.x + vrOffX, vrCamFrom.y, vrCamFrom.z + vrOffZ };
+                    Vec3f vrCamRes;
+                    CollisionPoly* vrCamPoly;
+                    s32 vrCamBgId;
+                    f32 vrKeep = 1.0f;
+                    if (BgCheck_EntitySphVsWall3(&play->colCtx, &vrCamRes, &vrCamTo, &vrCamFrom,
+                                                 vrPlayer->ageProperties->wallCheckRadius, &vrCamPoly, &vrCamBgId,
+                                                 &vrPlayer->actor, vrHead.y - vrCamFrom.y)) {
+                        vrKeep = ((vrCamRes.x - vrCamFrom.x) * vrOffX + (vrCamRes.z - vrCamFrom.z) * vrOffZ) /
+                                 vrOffLenSq;
+                        vrKeep = CLAMP(vrKeep, 0.0f, 1.0f);
+                    }
+                    vrHead.x += vrOffX * vrKeep;
+                    vrHead.z += vrOffZ * vrKeep;
                 }
             }
             // Roomscale: push the COMBINED anchor (body head minus the physical-walk displacement
             // already baked into the body by Player_UpdateCommon), so the eye stays continuous as the
             // body slides under the head and the existing anchor interpolation stays smooth. The
             // origin is horizontal only (x,z); y stays the body head height.
-            // Keep the camera within the SAME walls that stop Link's body, but ONLY for non-6DOF
-            // sources. gVrCameraWallEase: 1 = hard clamp, ~0.15 = gentle ease, 0 = off.
-            // gVrCameraWallCollision 0 disables this entirely.
-            if (CVarGetInteger("gVrCameraWallCollision", 1)) {
-                float vrResidual[2]; // the camera's current horizontal offset from Link's body
-                VR_GetRoomscaleDesired(vrResidual);
-                // Only meaningful for real physical leans: with the camera near Link (normal stick
-                // play) the joystick's own collision already bounds it. Sweep at the camera's
-                // ACTUAL eye height (vrHead.y — tuned offset + crawl reduction), not standing head
-                // height, so passing under low geometry (bridges) doesn't read as walled.
-                f32 vrResidualMagSq = SQ(vrResidual[0]) + SQ(vrResidual[1]);
-                if (vrResidualMagSq > SQ(8.0f)) {
-                    f32 vrCamY = vrHead.y;
-                    Vec3f vrCamFrom = { vrPlayer->actor.world.pos.x, vrCamY, vrPlayer->actor.world.pos.z };
-                    Vec3f vrCamTo = { vrCamFrom.x + vrResidual[0], vrCamY, vrCamFrom.z + vrResidual[1] };
-                    Vec3f vrCamRes = vrCamTo;
-                    CollisionPoly* vrCamPoly;
-                    s32 vrCamBgId;
-                    BgCheck_EntitySphVsWall3(&play->colCtx, &vrCamRes, &vrCamTo, &vrCamFrom,
-                                             vrPlayer->ageProperties->wallCheckRadius, &vrCamPoly, &vrCamBgId,
-                                             &vrPlayer->actor, 26.0f);
-                    float vrWallEase = CVarGetFloat("gVrCameraWallEase", 1.0f);
-                    VR_AddRoomscaleDisplacement((vrCamTo.x - vrCamRes.x) * vrWallEase,
-                                                (vrCamTo.z - vrCamRes.z) * vrWallEase);
-                }
-            }
+            // Physical head translation reaches the view ONLY through the body: Player_UpdateCommon
+            // has already moved Link as far as his collision allows, so whatever is left (a blocked
+            // step, or any state where roomscale doesn't move the body) is discarded here, down to
+            // the body-move deadzone (0.1, Player_UpdateCommon). The camera never leans away from
+            // Link, so it can't pass a wall that stops him.
             VR_SetViewFade(0.0f);
-            // Also bound the camera-to-body lean by distance, for places with no wall at head height
-            // (ledges, railings) where it could otherwise drift far from Link (0 = unbounded).
-            VR_ClampRoomscaleLean(CVarGetFloat("gVrRoomscaleMaxLean", 30.0f));
+            VR_ClampRoomscaleLean(0.1f);
             float vrRsOrigin[2];
             VR_GetRoomscaleOrigin(vrRsOrigin);
             vrHead.x -= vrRsOrigin[0];

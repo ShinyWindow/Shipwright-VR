@@ -464,7 +464,8 @@ extern "C" void VrItemSelect_Draw(void) {
             (player->modelGroup != PLAYER_MODELGROUP_DEFAULT &&
              player->heldItemAction != PLAYER_IA_BOMB && player->heldItemAction != PLAYER_IA_BOMBCHU)) return;
         // The bombchu preview and the boomerang pocket are real models, drawn by their own modules.
-        if (VrItemThrow_PreviewIsModel() || VrBoomerang_PreviewIsModel()) return;
+        if (VrItemThrow_PreviewIsModel() || VrBoomerang_PreviewIsModel() || VrLens_PreviewIsModel() ||
+            VrMask_PreviewIsModel()) return;
         float position[3], rotation[4];
         if (!VrItemThrow_PreviewPosition(position) && !VR_GetHandPose(SwordHand(), position, rotation)) return;
         sAnchor = { position[0], position[1], position[2] };
@@ -644,6 +645,8 @@ extern "C" void VrItemSelect_Reset(void) {
     VrArchery_Reset();
     VrBottle_Reset();
     VrBoomerang_Reset();
+    VrLens_Reset();
+    VrMask_Reset();
     CloseSelector();
     // Transient by design: a reset (save-state load, exit game, mode off) belongs to a state
     // where neither the pending restore nor the tracked loadout is trustworthy anymore.
@@ -675,6 +678,12 @@ extern "C" uint16_t VrItemSelect_TriggerItemMask(int32_t vrHand) {
     }
     if (VrBoomerang_Covers(player) && VrBoomerang_TriggerStandsDown()) {
         return 0; // the pocket / the hand owns the boomerang; the trigger must not start the vanilla aim
+    }
+    if (VrLens_Covers(player)) {
+        return 0; // the lens turns on by wearing it (VrLens.cpp); the trigger must not toggle it
+    }
+    if (VrMask_Covers(player)) {
+        return 0; // masks go on and off at the face (VrMask.cpp); the trigger must not toggle them
     }
     if (VrMagic_Covers(player) && !VrMagic_ChordHeld()) {
         return 0; // spells cast on BOTH triggers: the chord is the button press (VrMagic.cpp)

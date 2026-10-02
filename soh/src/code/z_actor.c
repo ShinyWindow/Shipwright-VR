@@ -2930,10 +2930,15 @@ void Actor_DrawLensOverlay(GraphicsContext* gfxCtx) {
     gDPSetTileSize(POLY_XLU_DISP++, G_TX_RENDERTILE, (SCREEN_WIDTH / 2 - LENS_MASK_WIDTH) << 2,
                    (SCREEN_HEIGHT / 2 - LENS_MASK_HEIGHT) << 2, (SCREEN_WIDTH / 2 + LENS_MASK_WIDTH - 1) << 2,
                    (SCREEN_HEIGHT / 2 + LENS_MASK_HEIGHT - 1) << 2);
-    gSPWideTextureRectangle(POLY_XLU_DISP++, x, 0, x + abs(x), SCREEN_HEIGHT << 2, G_TX_RENDERTILE, 0, 0, 0, 0);
-    gSPWideTextureRectangle(POLY_XLU_DISP++, 0, 0, w, SCREEN_HEIGHT << 2, G_TX_RENDERTILE, LENS_MASK_OFFSET_S << 5,
-                            LENS_MASK_OFFSET_T << 5, (1 << 10) * (SCREEN_WIDTH - 2 * LENS_MASK_OFFSET_S) / SCREEN_WIDTH,
-                            (1 << 10) * (SCREEN_HEIGHT - 2 * LENS_MASK_OFFSET_T) / SCREEN_HEIGHT);
+    // SOH [VR] Physical Lens of Truth worn on the face: the same mask on a head-glued quad in the
+    // glass's plane, so the circle is where the glass is, per eye (VrLens.cpp).
+    if (!VrLens_DrawAperture(gfxCtx)) {
+        gSPWideTextureRectangle(POLY_XLU_DISP++, x, 0, x + abs(x), SCREEN_HEIGHT << 2, G_TX_RENDERTILE, 0, 0, 0, 0);
+        gSPWideTextureRectangle(POLY_XLU_DISP++, 0, 0, w, SCREEN_HEIGHT << 2, G_TX_RENDERTILE, LENS_MASK_OFFSET_S << 5,
+                                LENS_MASK_OFFSET_T << 5,
+                                (1 << 10) * (SCREEN_WIDTH - 2 * LENS_MASK_OFFSET_S) / SCREEN_WIDTH,
+                                (1 << 10) * (SCREEN_HEIGHT - 2 * LENS_MASK_OFFSET_T) / SCREEN_HEIGHT);
+    }
     gDPPipeSync(POLY_XLU_DISP++);
     CLOSE_DISPS(gfxCtx);
 }

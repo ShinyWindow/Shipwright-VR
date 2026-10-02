@@ -26,8 +26,9 @@ extern PlayState* gPlayState;
 //
 // The Fairy Bow has its own profile (see "Fairy Bow profile" below): nock at the braced string,
 // shoot from the string hand through the arrow rest on the grip, string drawn to the hand, draw
-// length sets arrow power. Everything slingshot-specific (anchor sliders, apex calibration)
-// stays the slingshot's alone.
+// length sets arrow power. The slingshot keeps its own rules (nock at the braced pouch, draw =
+// hand-to-pouch gap, shot from the string hand through the pouch); both read their geometry off
+// the model they render, through the live hand draw matrix.
 //
 // Deliberate fallbacks: shooting galleries, bombchu bowling and horseback keep their own
 // schemes (Covers is false there), and gVrPhysArchery=0 restores the previous behavior where
@@ -64,35 +65,28 @@ float WorldScale() {
     return ws < 1.0f ? 35.0f : ws;
 }
 
-// Rotate a vector by a unit quaternion (x, y, z, w) — same layout the runtime hands out.
-void QuatRot(const float q[4], const float v[3], float out[3]) {
-    const float tx = 2.0f * (q[1] * v[2] - q[2] * v[1]);
-    const float ty = 2.0f * (q[2] * v[0] - q[0] * v[2]);
-    const float tz = 2.0f * (q[0] * v[1] - q[1] * v[0]);
-    out[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
-    out[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
-    out[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
-}
+// --- Slingshot geometry -----------------------------------------------------------------------
+// Read off the model it renders (object_link_child, measured October 1, 2026). In the bow hand's
+// limb frame the fork prongs end at X ~ 605-663, Z = +-395..425; the band DL
+// (gLinkChildSlingshotStringDL) is drawn translated to sBowStringData[1] = (606, 236, 0), the
+// midpoint between the prong tips, with its ends there (Z = +-343) and its pouch apex authored
+// at (-9.5, -1324.5, 55) relative to that root, pulled along -Y (the shot flies along +Y). At
+// rest the band is flat, so the pouch sits at the root. (The drawn band maps that apex onto the
+// pouch point, z_player_lib.c.)
+constexpr float kSlingRoot[3] = { 606.0f, 236.0f, 0.0f }; // model units, R_HAND limb frame
 
-// The nock anchor: where the string physically lives on the weapon — the weapon-hand
-// controller plus the user-tuned grip-local offset (cm sliders; right/up/forward in the
-// controller's own frame, forward = -Z as OpenXR defines it). The marker shows this point,
-// reach and draw distance measure against it, and the shot flies string-hand -> anchor.
+// The nock anchor: the braced pouch (band root) through the live bow-hand draw matrix, so it sits
+// on the slingshot at every world scale. The marker shows this point, reach and draw distance
+// measure against it, and the shot flies string-hand -> anchor. (Replaces the controller-cm
+// sliders tuned September 14, 2026, which landed within about half a centimetre of this point at
+// 35 units/m and drifted off it at any other scale.)
 bool NockAnchorWorld(float* out3) {
-    float pos[3], rot[4];
-    if (!VR_GetHandPose(BowHand(), pos, rot)) {
+    float m[4][4];
+    if (!VR_GetHandMatrix(BowHand(), m)) {
         return false;
     }
-    const float u = 0.01f * WorldScale(); // cm -> game units
-    float mirror = CVarGetInteger("gVrLeftHanded", 0) ? -1.0f : 1.0f;
-    // Defaults are the headset-tuned slingshot values (September 14, 2026).
-    const float local[3] = { CVarGetFloat("gVrArcheryAnchorRight", 4.0f) * u * mirror,
-                             CVarGetFloat("gVrArcheryAnchorUp", -5.0f) * u,
-                             -CVarGetFloat("gVrArcheryAnchorFwd", 17.0f) * u };
-    float off[3];
-    QuatRot(rot, local, off);
     for (int i = 0; i < 3; i++) {
-        out3[i] = pos[i] + off[i];
+        out3[i] = m[0][i] * kSlingRoot[0] + m[1][i] * kSlingRoot[1] + m[2][i] * kSlingRoot[2] + m[3][i];
     }
     return true;
 }
@@ -112,8 +106,7 @@ float DrawGapM() {
 }
 
 // --- Fairy Bow profile ------------------------------------------------------------------------
-// The slingshot's pouch-and-fork geometry is a tuned controller offset; the bow instead reads its
-// geometry straight off the model it renders (object_link_boy, measured September 30, 2026): in
+// Like the slingshot, the bow reads its geometry straight off the model it renders (object_link_boy, measured September 30, 2026): in
 // the bow hand's limb frame the riser runs along model X (bow tips at X = +-2010, string ends at
 // +-1483), the arrow flies along +Y, and the string rests 360.4 behind the grip (sBowStringData).
 // The string DL's apex vertex — the nocking point — sits at X = 360 (the top of the fist) and
@@ -122,8 +115,13 @@ float DrawGapM() {
 // hand, and how far you draw decides the shot's power.
 constexpr float kBowNockX = 360.0f;     // model units, riser height of the nock / arrow rest
 constexpr float kBowStringY = -360.4f;  // model units, braced string behind the grip
-constexpr float kArrowNockBack = 3.96f; // world units: EnArrow's model nock end sits 396 model
-                                        // units (scale 0.01) behind the actor origin
+// The nocked arrow's nock end, behind its actor origin (world units: model units x actor scale
+// 0.01). gArrowNearDL runs from the arrowhead point at X = -396 to the nock end at X = +2001
+// (fletching vanes at 1438..1958); gArrowSkel's second limb sits at (-1, 0, 998) and its third
+// turns the DL +90 deg about Y (gArrow2Anim frame 0, the pose a held arrow keeps), so the shaft
+// points along actor +Z with the tip 1394 ahead and the nock end 1003 behind the origin.
+// (Measured October 1, 2026; the earlier 3.96 read the DL backwards and needed a cm trim.)
+constexpr float kArrowNockBack = 10.03f;
 
 struct BowFrame {
     float rest[3];       // arrow rest on the riser, world
@@ -295,7 +293,7 @@ bool BowNock(float* nock3, float* dir3, float* drawM) {
     return true;
 }
 
-// Where the string hand nocks: the braced string for the bow, the tuned anchor for the slingshot.
+// Where the string hand nocks: the braced string for the bow, the braced pouch for the slingshot.
 bool NockTargetWorld(float* out3) {
     if (HoldsBowNow()) {
         BowFrame f;
@@ -373,7 +371,7 @@ extern "C" void VrArchery_Reset(void) {
 // always loaded) rendered in-world at the nock anchor while the bow/slingshot is out and no
 // nock is drawn. It grows when the string hand is in pinch reach. DELIBERATELY minimal gates
 // (mode + cvar + weapon out, none of the input-side availability checks): the icon is a
-// tuning target for the anchor sliders and a liveness diagnostic — it must show even when
+// check that the nock sits on the model and a liveness diagnostic — it must show even when
 // the input gates are the thing that is broken. extern "C" linkage is load-bearing for the
 // block-scope FrameInterpolation declarations inside OPEN_DISPS (see VrItemSelect_Draw).
 extern "C" void VrArchery_DrawNockIcon(void) {
@@ -408,11 +406,6 @@ extern "C" void VrArchery_DrawNockIcon(void) {
     gSPDisplayList(POLY_OPA_DISP++, (Gfx*)gItemDropDL);
     FrameInterpolation_RecordCloseChild();
     CLOSE_DISPS(gPlayState->state.gfxCtx);
-}
-
-// True while a nock is drawn — the string presentation renders pulled to the string hand.
-extern "C" bool VrArchery_StringNocked(void) {
-    return sNocked && gPlayState != NULL && VrArchery_Covers(GET_PLAYER(gPlayState));
 }
 
 // The nock is a held item button: nonzero exactly while nocked, so padmgr ORs the weapon's
@@ -480,11 +473,8 @@ extern "C" bool VrArchery_AimSegment(float* outPosDir6) {
             }
             return false;
         }
-        // gVrBowArrowOffset (cm, + = toward the bow) slides the arrow model along its own line so
-        // its nock can be matched to the drawn string by eye; the shot line is unchanged.
-        const float along = kArrowNockBack + CVarGetFloat("gVrBowArrowOffset", 0.0f) * 0.01f * WorldScale();
         for (int i = 0; i < 3; i++) {
-            sAimLatch[i] = nock[i] + dir[i] * along;
+            sAimLatch[i] = nock[i] + dir[i] * kArrowNockBack;
             sAimLatch[3 + i] = dir[i];
         }
         for (int i = 0; i < 6; i++) {
@@ -532,6 +522,33 @@ extern "C" bool VrArchery_BowStringNock(float* out3) {
     }
     float dir[3], drawM;
     return BowNock(out3, dir, &drawM);
+}
+
+// Slingshot band visual: where the pouch is drawn while a slingshot nock is drawn — the string
+// hand, but the band stretches only so far (1.25 x full draw from the braced pouch, the bow's
+// rule); past that the pouch stops and the hand keeps going. The z_player_lib band block maps
+// the band DL's apex exactly onto this point.
+extern "C" bool VrArchery_SlingshotPouch(float* out3) {
+    if (!sNocked || gPlayState == NULL || HoldsBowNow() || !VrArchery_Covers(GET_PLAYER(gPlayState))) {
+        return false;
+    }
+    float s[3], rot[4], a[3];
+    if (!VR_GetHandPose(StringHand(), s, rot) || !NockAnchorWorld(a)) {
+        return false;
+    }
+    float d[3];
+    float d2 = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        d[i] = s[i] - a[i];
+        d2 += d[i] * d[i];
+    }
+    const float len = std::sqrt(d2);
+    const float maxLen = CVarGetFloat("gVrArcheryFullDraw", 45.0f) * 0.01f * 1.25f * WorldScale();
+    const float k = (len > maxLen && len > 1e-6f) ? maxLen / len : 1.0f;
+    for (int i = 0; i < 3; i++) {
+        out3[i] = a[i] + d[i] * k;
+    }
+    return true;
 }
 
 // Bow hand limb draw: replaces the raw controller matrix (engine MtxF layout, 16 floats) with

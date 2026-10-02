@@ -4,6 +4,7 @@ extern "C" {
 #include "functions.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
 extern PlayState* gPlayState;
+extern SaveContext gSaveContext;
 }
 #include "VrCombat.h"
 
@@ -15,8 +16,8 @@ extern PlayState* gPlayState;
 #include <cmath>
 
 // Physical bottle (VR first person, selector mode). Two interactions so far, both built on one
-// notion: the bottle MOUTH — the sword-hand controller plus a grip-local offset, tuned like the
-// archery nock anchor, with a marker drawn there.
+// notion: the bottle MOUTH — the rim centre of the held bottle model through the live hand draw
+// matrix (MouthAnchorWorld), with a marker drawn there.
 //
 // SCOOPING (empty bottle). Vanilla catches work in two halves: every catchable actor (fairy,
 // fish, blue fire, bugs) offers itself each frame through Actor_OfferGetItem(GI_MAX) when
@@ -115,51 +116,29 @@ float WorldScale() {
     return ws < 1.0f ? 35.0f : ws;
 }
 
-void QuatRot(const float q[4], const float v[3], float out[3]) {
-    const float tx = 2.0f * (q[1] * v[2] - q[2] * v[1]);
-    const float ty = 2.0f * (q[2] * v[0] - q[0] * v[2]);
-    const float tz = 2.0f * (q[0] * v[1] - q[1] * v[0]);
-    out[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
-    out[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
-    out[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
-}
+// The bottle opening in the held model's own coordinates: the centre of the rim ring, the
+// cross-section at X = +440 of gLinkAdultBottleDL / gLinkChildBottleDL (vertices (440, 220..1033,
+// -510..303) adult, (440, 162..975, -492..321) child; the child mesh is the adult one shifted
+// -58 on Y and +18 on Z). Both are drawn in L_HAND space (z_player_lib.c, sBottleDLists).
+constexpr float kBottleRimX = 440.0f;
+constexpr float kBottleRimYZ[2][2] = { { 626.0f, -104.0f }, { 568.0f, -86.0f } }; // [linkAge]
 
-// Grip-local mouth offset in game units (cm sliders; right/up/forward in the controller's own
-// frame, forward = -Z). Says only where the opening is; the bottle's up axis comes from the
-// hand limb matrix (BottleUpWorld), never from this offset.
-void MouthLocal(float* out3) {
-    const float u = 0.01f * WorldScale();
-    const float mirror = CVarGetInteger("gVrLeftHanded", 0) ? -1.0f : 1.0f;
-    // Defaults are the user's headset-tuned values (September 14, 2026).
-    out3[0] = CVarGetFloat("gVrBottleMouthRight", -6.0f) * u * mirror;
-    out3[1] = CVarGetFloat("gVrBottleMouthUp", -18.0f) * u;
-    out3[2] = -CVarGetFloat("gVrBottleMouthFwd", 9.0f) * u;
-}
-
-// The bottle mouth in world, plus (optionally) the unit bottle axis (base -> mouth) in world.
-bool MouthAnchorWorld(float* out3, float* axisOut3 = nullptr) {
-    float pos[3], rot[4], local[3], off[3];
-    if (!VR_GetHandPose(BottleHand(), pos, rot)) {
+// The bottle mouth in world: the rim centre through the live hand draw matrix, so it sits on
+// the opening at every world scale, either age and with the hand calibration, exactly as the
+// model is rendered. (Replaces the controller-centimetre sliders tuned adult-only on September
+// 14, 2026, which landed within about 1 cm of this point at 35 units/m and drifted off it at
+// any other scale.)
+bool MouthAnchorWorld(float* out3) {
+    float m[4][4];
+    if (!VR_GetHandMatrix(BottleHand(), m)) {
         return false;
     }
-    MouthLocal(local);
-    QuatRot(rot, local, off);
-    float len = 0.0f;
+    const int age = gSaveContext.linkAge != 0 ? 1 : 0;
+    const float x = kBottleRimX;
+    const float y = kBottleRimYZ[age][0];
+    const float z = kBottleRimYZ[age][1];
     for (int i = 0; i < 3; i++) {
-        out3[i] = pos[i] + off[i];
-        len += off[i] * off[i];
-    }
-    if (axisOut3 != nullptr) {
-        len = std::sqrt(len);
-        if (len < 0.001f) {
-            // Degenerate offset (mouth at the grip): treat the controller's forward as the axis.
-            const float fwd[3] = { 0.0f, 0.0f, -1.0f };
-            QuatRot(rot, fwd, axisOut3);
-        } else {
-            for (int i = 0; i < 3; i++) {
-                axisOut3[i] = off[i] / len;
-            }
-        }
+        out3[i] = m[0][i] * x + m[1][i] * y + m[2][i] * z + m[3][i];
     }
     return true;
 }
@@ -167,21 +146,19 @@ bool MouthAnchorWorld(float* out3, float* axisOut3 = nullptr) {
 // The bottle's UP axis in world: held items are authored along the hand limb's local +X (the
 // sword blade sits at +5000 on X in func_80090A28), and the bottle display list lives in that
 // same hand space, so the limb matrix's first column is the bottle's base -> mouth direction.
-// This is independent of the mouth-offset sliders, which only say where the opening is. Falls
-// back to the grip -> mouth line if the hand matrix is unavailable.
 bool BottleUpWorld(float* out3) {
     float m[4][4];
-    if (VR_GetHandMatrix(BottleHand(), m)) {
-        const float len = std::sqrt(m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]);
-        if (len > 0.0001f) {
-            out3[0] = m[0][0] / len;
-            out3[1] = m[0][1] / len;
-            out3[2] = m[0][2] / len;
-            return true;
-        }
+    if (!VR_GetHandMatrix(BottleHand(), m)) {
+        return false;
     }
-    float mouth[3];
-    return MouthAnchorWorld(mouth, out3);
+    const float len = std::sqrt(m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]);
+    if (len < 0.0001f) {
+        return false;
+    }
+    out3[0] = m[0][0] / len;
+    out3[1] = m[0][1] / len;
+    out3[2] = m[0][2] / len;
+    return true;
 }
 
 bool sInvertedNow = false; // last tick's inversion verdict, for the marker
@@ -614,7 +591,7 @@ extern "C" void VrBottle_GetDebug(VrBottleDebug* out) {
 
 // Mouth marker: a miniature Deku Nut at the bottle mouth while a bottle is out, growing when a
 // catchable is in the near band. Deliberately minimal gates (mode + cvar + bottle in hand): it
-// is the tuning target for the mouth offset sliders and the liveness diagnostic when the
+// is the visual check that the mouth sits on the model's opening and the liveness diagnostic when the
 // offer/commit gates misbehave. extern "C" linkage is load-bearing for the block-scope
 // FrameInterpolation declarations inside OPEN_DISPS (see VrItemSelect_Draw).
 extern "C" void VrBottle_DrawMouthMarker(void) {

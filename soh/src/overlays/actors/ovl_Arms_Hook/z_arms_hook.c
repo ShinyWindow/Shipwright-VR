@@ -335,6 +335,13 @@ void ArmsHook_Draw(Actor* thisx, PlayState* play) {
         }
         // SOH [VR] While idle in the hand, the hook (and below, its chain stub) is welded to the
         // live controller pose instead of trailing the hookshot at the 20 Hz tick (no-op otherwise).
+        // SOH [VR] Real-life hand scale: the idle hook is sized with the hookshot, about its seat
+        // in the barrel (the actor origin); the chain stub below only in thickness.
+        s32 vrHookWelded = VrHookshot_IdleWelded(&this->actor);
+        f32 vrHookS = vrHookWelded ? VrHand_ScaleFactor() : 1.0f;
+        if (vrHookWelded) {
+            Matrix_Scale(vrHookS, vrHookS, vrHookS, MTXMODE_APPLY);
+        }
         Mtx* vrTipMtx = MATRIX_NEWMTX(play->state.gfxCtx);
         VrHookshot_WeldIdleHook(&this->actor, vrTipMtx);
         gSPMatrix(POLY_OPA_DISP++, vrTipMtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
@@ -352,6 +359,9 @@ void ArmsHook_Draw(Actor* thisx, PlayState* play) {
             Matrix_Scale(0.012f, 0.012f, sqrtf(SQ(sp78.y) + sp58) * 0.01f, MTXMODE_APPLY);
         } else {
             Matrix_Scale(0.015f, 0.015f, sqrtf(SQ(sp78.y) + sp58) * 0.01f, MTXMODE_APPLY);
+        }
+        if (vrHookWelded) {
+            Matrix_Scale(vrHookS, vrHookS, 1.0f, MTXMODE_APPLY); // SOH [VR]
         }
         Mtx* vrChainMtx = MATRIX_NEWMTX(play->state.gfxCtx);
         VrHookshot_WeldIdleHook(&this->actor, vrChainMtx); // SOH [VR]

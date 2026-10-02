@@ -542,6 +542,98 @@ static void VrBoomerangReadout(WidgetInfo& info) {
                                                        : "missed, back to the pocket");
 }
 
+// Live state of the physical Lens of Truth: pocket / hand / face, which gate holds it, in the hand
+// how far the glass is from the worn spot (and whether it may go on yet), and whether the reveal
+// is on. The in-headset answer to "I held it to my face and nothing happened".
+static void VrHandScaleReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    float ws = VR_GetWorldScale();
+    if (ws < 1.0f) {
+        ws = 35.0f;
+    }
+    // Open-hand lengths, wrist to fingertip, in game units at Link's 0.01 scale (adult / child
+    // hand DLs: 862 / 548 model units).
+    const float adultUnits = 8.62f;
+    const float childUnits = 5.48f;
+    const bool on = CVarGetInteger("gVrRealHandScale", 1) != 0;
+    ImGui::Text("World scale now: %.1f units/m (%s), Link is %s", ws,
+                CVarGetInteger("gVrAutoWorldScale", 1) ? "auto" : "manual",
+                VrHand_ChildSized() ? "a child" : "an adult");
+    if (on) {
+        ImGui::Text("Hands drawn at: adult %.1f cm, child %.1f cm  (now x%.2f Link's size)",
+                    CVarGetFloat("gVrHandSizeCm", 23.0f), CVarGetFloat("gVrHandSizeCmChild", 23.0f),
+                    VrHand_ScaleFactor());
+    }
+    ImGui::Text("World-scale size would be: adult %.1f cm, child %.1f cm%s", adultUnits / ws * 100.0f,
+                childUnits / ws * 100.0f, on ? "" : "  (in use: real-life scale is off)");
+    ImGui::TextDisabled("Held items scale with the hand. Sword, shield and hammer hit what you see.");
+}
+
+static void VrLensReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    static const char* sState[] = { "none", "POCKET", "IN HAND", "WORN" };
+    static const char* sGate[] = {
+        "ARMED",
+        "off (Physical Lens unchecked)",
+        "lens not selected / not in normal play",
+        "cutscene, pause or Link busy (state kept)",
+        "no pocket point (headset untracked)",
+    };
+    static const char* sHand[] = { "left", "right" };
+    VrLensDebug d;
+    VrLens_GetDebug(&d);
+    const int state = (d.state >= 0 && d.state < 4) ? d.state : 0;
+    const int gate = (d.gate >= 0 && d.gate < 5) ? d.gate : 0;
+    ImGui::Text("Lens: %s   (%s)", sState[state], sGate[gate]);
+    if (state == 2 && d.carryHand >= 0 && d.carryHand < 2) {
+        if (d.glassToFaceCm >= 0.0f) {
+            ImGui::Text("In the %s hand — glass %.0f cm from the worn spot (goes on within %.0f)%s", sHand[d.carryHand],
+                        d.glassToFaceCm, d.wearDistanceCm, d.armed ? "" : "   move it away first");
+        } else {
+            ImGui::Text("In the %s hand", sHand[d.carryHand]);
+        }
+    }
+    ImGui::Text("Reveal: %s%s   last put-on: %s", d.lensActive ? "ON" : "off", d.ours ? " (worn)" : "",
+                d.lastActivate < 0    ? "none yet"
+                : d.lastActivate == 1 ? "turned on"
+                                      : "REFUSED (no magic / magic busy)");
+}
+
+// Live state of the physical masks: what's selected, in the hand and on the face, and in the hand
+// how far the mask is from the face spot.
+static void VrMaskReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    static const char* sState[] = { "none", "POCKET", "IN HAND" };
+    static const char* sGate[] = {
+        "ARMED",
+        "off (Physical Masks unchecked)",
+        "not in selector play (or horse / water / minigame)",
+        "cutscene, pause or Link busy (state kept)",
+    };
+    static const char* sMask[] = { "none", "Keaton", "Skull", "Spooky", "Bunny Hood",
+                                   "Goron", "Zora", "Gerudo", "Mask of Truth" };
+    auto name = [](int m) { return (m >= 0 && m < 9) ? sMask[m] : "?"; };
+    VrMaskDebug d;
+    VrMask_GetDebug(&d);
+    const int state = (d.state >= 0 && d.state < 3) ? d.state : 0;
+    const int gate = (d.gate >= 0 && d.gate < 4) ? d.gate : 0;
+    ImGui::Text("Masks: %s   (%s)", sState[state], sGate[gate]);
+    ImGui::Text("Selected: %s   Worn: %s   In hand: %s", name(d.selected), name(d.worn), name(d.held));
+    if (state == 2 && d.maskToFaceCm >= 0.0f) {
+        ImGui::Text("Mask %.0f cm from your face (goes on within %.0f)%s", d.maskToFaceCm, d.wearDistanceCm,
+                    d.armed ? "" : "   move it away first");
+    }
+}
+
 // Live state of the physical hammer: which hands hold it, the off hand's distance to the handle
 // against the reach, the simulated head's speed and swing tier, and what the head's last contact
 // counted as. The in-headset answer to "my off hand won't take the handle" and "I slammed the
@@ -794,6 +886,134 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Raise/lower the eye anchor relative to Link's eye height, in game "
                               "units. Lowering it brings the ground closer by exactly offset / world "
                               "scale meters."));
+
+    AddWidget(comfortPath, "Hand & Item Size", WIDGET_SEPARATOR_TEXT);
+    AddWidget(comfortPath, "Real-Life Hand Scale", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrRealHandScale")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Draw your hands, and everything you hold, at one real-life size instead of letting "
+            "the world scale resize them. Same size on auto or manual world scale, for any player "
+            "height, with its own size for adult and child Link. Held items are "
+            "drawn on the hand, so they keep matching it; the sword, shield and hammer hit "
+            "exactly what you see. Off = hands follow the world scale (the old behavior)."));
+    AddWidget(comfortPath, "Adult Hand Size: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandSizeCm")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrRealHandScale", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(8.0f)
+                     .Max(40.0f)
+                     .DefaultValue(23.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Adult Link's open hand, wrist to fingertip, in real centimetres. "
+                              "Calibrate as adult: hold your hand up, open, next to Link's and "
+                              "match the fingertips. Applies live."));
+    AddWidget(comfortPath, "Child Hand Size: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandSizeCmChild")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrRealHandScale", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(5.0f)
+                     .Max(40.0f)
+                     .DefaultValue(23.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Child Link's open hand, wrist to fingertip, in real centimetres. "
+                              "Calibrate as child the same way. Applies live."));
+    AddWidget(comfortPath, "VrHandScaleReadout", WIDGET_CUSTOM).CustomFunction(VrHandScaleReadout).HideInSearch(true);
+
+    AddWidget(comfortPath, "Hand Rotation (sword hand)", WIDGET_SEPARATOR_TEXT);
+    AddWidget(comfortPath, "Tune while looking at the SWORD hand - the other hand mirrors automatically.", WIDGET_TEXT);
+    AddWidget(comfortPath, "Pitch: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandCalPitch")
+        .Options(FloatSliderOptions()
+                     .Min(-180.0f)
+                     .Max(180.0f)
+                     .DefaultValue(88.0f)
+                     .Step(1.0f)
+                     .Format("%.1f")
+                     .Tooltip("Rotation about the grip X axis (wrist tilt up/down)."));
+    AddWidget(comfortPath, "Yaw: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandCalYaw")
+        .Options(FloatSliderOptions()
+                     .Min(-180.0f)
+                     .Max(180.0f)
+                     .DefaultValue(-100.0f)
+                     .Step(1.0f)
+                     .Format("%.1f")
+                     .Tooltip("Rotation about the grip Y axis. If the sword points backward or sideways "
+                              "out of your fist, adjust this first."));
+    AddWidget(comfortPath, "Roll: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandCalRoll")
+        .Options(FloatSliderOptions()
+                     .Min(-180.0f)
+                     .Max(180.0f)
+                     .DefaultValue(80.0f)
+                     .Step(1.0f)
+                     .Format("%.1f")
+                     .Tooltip("Rotation about the grip Z axis (twist around the handle - use to line up "
+                              "the blade edge and palm)."));
+
+    AddWidget(comfortPath, "Hand Position (sword hand)", WIDGET_SEPARATOR_TEXT);
+    AddWidget(comfortPath, "Offset X: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandOffX")
+        .Options(FloatSliderOptions()
+                     .Min(-15.0f)
+                     .Max(15.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Slide the hand along the grip X axis (real cm, so it holds at any world "
+                              "scale; the other controller mirrors)."));
+    AddWidget(comfortPath, "Offset Y: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandOffY")
+        .Options(FloatSliderOptions()
+                     .Min(-15.0f)
+                     .Max(15.0f)
+                     .DefaultValue(6.3f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Slide the hand along the grip Y axis."));
+    AddWidget(comfortPath, "Offset Z: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandOffZ")
+        .Options(FloatSliderOptions()
+                     .Min(-15.0f)
+                     .Max(15.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Slide the hand along the grip Z axis (roughly along the handle)."));
+
+    AddWidget(comfortPath, "Left Hand Override", WIDGET_SEPARATOR_TEXT);
+    AddWidget(comfortPath, "Tune Left Hand Separately", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrHandLOverride")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "By default the left controller's hand is derived from the values above by mirror symmetry. "
+            "If it doesn't look right, enable this and dial it in with its own values below."));
+    AddWidget(comfortPath, "L Pitch: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandLCalPitch")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(-149.0f).Step(1.0f).Format("%.1f"));
+    AddWidget(comfortPath, "L Yaw: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandLCalYaw")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(76.0f).Step(1.0f).Format("%.1f"));
+    AddWidget(comfortPath, "L Roll: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandLCalRoll")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(30.0f).Step(1.0f).Format("%.1f"));
+    AddWidget(comfortPath, "L Offset X: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandLOffX")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
+        .Options(FloatSliderOptions().Min(-15.0f).Max(15.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+    AddWidget(comfortPath, "L Offset Y: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandLOffY")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
+        .Options(FloatSliderOptions().Min(-15.0f).Max(15.0f).DefaultValue(6.3f).Step(0.5f).Format("%.1f"));
+    AddWidget(comfortPath, "L Offset Z: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHandLOffZ")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
+        .Options(FloatSliderOptions().Min(-15.0f).Max(15.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+
 
     // ------------------------------------------------------------------ Gameplay
     AddSidebarEntry("VR Settings", "Gameplay", 1);
@@ -1918,35 +2138,6 @@ void SohMenu::AddMenuVRSettings() {
                      .Format("%.1f")
                      .Tooltip("Turn the hookshot's shot right (+) or left (-). Mirrored when the hookshot "
                               "is in the left controller."));
-    AddWidget(devPath, "Hookshot Origin Right: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHookshotAimRight")
-        .Options(FloatSliderOptions()
-                     .Min(-100.0f)
-                     .Max(100.0f)
-                     .DefaultValue(0.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Slide the point the hook launches from (and the laser starts at) to the "
-                              "right (+) or left (-) of the controller. Mirrored in the left controller."));
-    AddWidget(devPath, "Hookshot Origin Up: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHookshotAimUp")
-        .Options(FloatSliderOptions()
-                     .Min(-100.0f)
-                     .Max(100.0f)
-                     .DefaultValue(0.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Raise (+) or lower (-) the hook's launch point relative to the controller."));
-    AddWidget(devPath, "Hookshot Origin Forward: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHookshotAimFwd")
-        .Options(FloatSliderOptions()
-                     .Min(-100.0f)
-                     .Max(100.0f)
-                     .DefaultValue(0.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Push the hook's launch point forward (+) along the shot, e.g. out to the "
-                              "hookshot's tip, or back (-)."));
     AddWidget(devPath, "Slingshot & Bow", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Archery", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysArchery")
@@ -1967,36 +2158,6 @@ void SohMenu::AddMenuVRSettings() {
                      .Step(1.0f)
                      .Format("%.0f")
                      .Tooltip("How close the string hand must be to the slingshot's nock point to nock."));
-    AddWidget(devPath, "Slingshot Nock Point Right: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrArcheryAnchorRight")
-        .Options(FloatSliderOptions()
-                     .Min(-40.0f)
-                     .Max(40.0f)
-                     .DefaultValue(4.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Moves the nock point (the marker you pinch) sideways in the weapon "
-                              "hand's own frame, so it can sit on the visible string instead of "
-                              "the controller. Mirrored automatically for left-handed mode."));
-    AddWidget(devPath, "Slingshot Nock Point Up: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrArcheryAnchorUp")
-        .Options(FloatSliderOptions()
-                     .Min(-40.0f)
-                     .Max(40.0f)
-                     .DefaultValue(-5.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Moves the nock point along the weapon hand's up axis."));
-    AddWidget(devPath, "Slingshot Nock Point Forward: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrArcheryAnchorFwd")
-        .Options(FloatSliderOptions()
-                     .Min(-40.0f)
-                     .Max(40.0f)
-                     .DefaultValue(17.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Moves the nock point along the weapon hand's pointing direction "
-                              "(negative = toward you, where a slingshot pouch usually sits)."));
     AddWidget(devPath, "Slingshot Minimum Draw: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryMinDraw")
         .Options(FloatSliderOptions()
@@ -2018,17 +2179,6 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Size of the Deku Nut nock-point icon, as a percent of a normal "
                               "nut drop. Make it as tiny as you like; it still grows slightly "
                               "when your string hand is in pinch reach."));
-    AddWidget(devPath, "Slingshot Band Visual Scale: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrArcheryStringApex")
-        .Options(FloatSliderOptions()
-                     .Min(200.0f)
-                     .Max(5000.0f)
-                     .DefaultValue(1500.0f)
-                     .Step(25.0f)
-                     .Format("%.0f")
-                     .Tooltip("Calibrates how far the string visual stretches to reach your "
-                              "pulling hand (model units at full scale). If the drawn string "
-                              "overshoots your hand, raise this; if it falls short, lower it."));
     AddWidget(devPath, "Fairy Bow", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Bow Nock Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrBowNockRadius")
@@ -2075,17 +2225,6 @@ void SohMenu::AddMenuVRSettings() {
                               "from your string hand through the bow grip, so the arrow always "
                               "points straight out of the bow wherever you pull. Your wrist's "
                               "tilt is kept. Disable to keep the bow fixed to your controller."));
-    AddWidget(devPath, "Bow Arrow Position: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrBowArrowOffset")
-        .Options(FloatSliderOptions()
-                     .Min(-80.0f)
-                     .Max(80.0f)
-                     .DefaultValue(0.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Slides the nocked arrow along its own line so its back end sits "
-                              "on the drawn string. Positive = toward the bow, negative = back "
-                              "toward you. Only moves the model; the shot line is the same."));
     AddWidget(devPath, "Bottle", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Bottle Scooping", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysBottleScoop")
@@ -2101,38 +2240,9 @@ void SohMenu::AddMenuVRSettings() {
         .Options(CheckboxOptions()
                      .DefaultValue(true)
                      .Tooltip("Draws a tiny Deku Nut at the point the game treats as the bottle "
-                              "mouth, for lining up the offset sliders below. It grows when a "
-                              "catchable is within reach. Turn off once tuned."));
-    AddWidget(devPath, "Bottle Mouth Right: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrBottleMouthRight")
-        .Options(FloatSliderOptions()
-                     .Min(-40.0f)
-                     .Max(40.0f)
-                     .DefaultValue(-6.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Moves the bottle mouth sideways in the bottle hand's own frame so "
-                              "the marker sits on the visible bottle's opening. Mirrored for "
-                              "left-handed mode."));
-    AddWidget(devPath, "Bottle Mouth Up: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrBottleMouthUp")
-        .Options(FloatSliderOptions()
-                     .Min(-40.0f)
-                     .Max(40.0f)
-                     .DefaultValue(-18.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Moves the bottle mouth along the bottle hand's up axis."));
-    AddWidget(devPath, "Bottle Mouth Forward: %.1f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrBottleMouthFwd")
-        .Options(FloatSliderOptions()
-                     .Min(-40.0f)
-                     .Max(40.0f)
-                     .DefaultValue(9.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Moves the bottle mouth along the bottle hand's pointing direction "
-                              "(negative = toward you)."));
+                              "mouth: the centre of the bottle model's rim, so it rides the "
+                              "opening at any world scale and either age. It grows when a "
+                              "catchable is within reach."));
     AddWidget(devPath, "Bottle Catch Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrBottleCatchRadius")
         .Options(FloatSliderOptions()
@@ -2246,6 +2356,121 @@ void SohMenu::AddMenuVRSettings() {
                               "either trigger before then and the spell fizzles: no magic spent, "
                               "you can move again. Disable to cast with the one trigger of the "
                               "hand holding the spell."));
+    AddWidget(devPath, "Lens of Truth", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Lens of Truth", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysLens")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Select the Lens of Truth and it appears in front of you. Grab it "
+                              "with either grip and hold it up to your face: it attaches and the "
+                              "lens turns on (uses magic as usual). Grip it at your face to take "
+                              "it off. Switching items takes it off too. Disable to toggle the "
+                              "lens with the trigger instead."));
+    AddWidget(devPath, "Lens Size (glass radius, cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLensRadius")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(12.0f)
+                     .DefaultValue(5.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Real size of the lens glass. Bigger (or closer) = a wider view "
+                              "through it."));
+    AddWidget(devPath, "Worn Distance (cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLensDistance")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(25.0f)
+                     .DefaultValue(7.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("How far in front of your eyes the lens sits once it's on."));
+    AddWidget(devPath, "Worn Side Offset (cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLensSide")
+        .Options(FloatSliderOptions()
+                     .Min(-6.0f)
+                     .Max(6.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("0 = centered between your eyes. About +-3 puts it over one eye "
+                              "(positive = right), like a monocle."));
+    AddWidget(devPath, "Worn Height Offset (cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLensHeight")
+        .Options(FloatSliderOptions()
+                     .Min(-8.0f)
+                     .Max(8.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Raise or lower the worn lens relative to your eye line."));
+    AddWidget(devPath, "Put-On Distance (cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLensWearDistance")
+        .Options(FloatSliderOptions()
+                     .Min(4.0f)
+                     .Max(25.0f)
+                     .DefaultValue(10.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("The lens attaches once its glass comes this close to where it "
+                              "sits when worn."));
+    AddWidget(devPath, "Lens Pocket Size (%)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLensPreviewScale")
+        .Options(FloatSliderOptions()
+                     .Min(20.0f)
+                     .Max(100.0f)
+                     .DefaultValue(60.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the lens waiting in front of you, relative to its real "
+                              "size in your hand."));
+    AddWidget(devPath, "Show Lens Frame While Worn", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrLensShowFrame")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Draw the lens's frame and handle in front of your face while it's "
+                              "on. The see-through circle works either way."));
+    AddWidget(devPath, "VrLensReadout", WIDGET_CUSTOM).CustomFunction(VrLensReadout).HideInSearch(true);
+    AddWidget(devPath, "Masks", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Masks", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysMasks")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Select a mask and it appears in front of you. Grab it and hold it "
+                              "to your face to put it on (it replaces any mask you're wearing). "
+                              "It stays on when you switch items. Grip at your face any time to "
+                              "take it off. Disable to put masks on and off with the trigger."));
+    AddWidget(devPath, "Mask Size (cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrMaskSize")
+        .Options(FloatSliderOptions()
+                     .Min(10.0f)
+                     .Max(40.0f)
+                     .DefaultValue(22.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Real height of a typical mask in your hand (each mask keeps its "
+                              "own proportions)."));
+    AddWidget(devPath, "Mask Put-On Distance (cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrMaskWearDistance")
+        .Options(FloatSliderOptions()
+                     .Min(5.0f)
+                     .Max(25.0f)
+                     .DefaultValue(12.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("The mask goes on once its middle comes this close to the front "
+                              "of your face."));
+    AddWidget(devPath, "Mask Pocket Size (%)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrMaskPreviewScale")
+        .Options(FloatSliderOptions()
+                     .Min(20.0f)
+                     .Max(100.0f)
+                     .DefaultValue(60.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the mask waiting in front of you, relative to its real "
+                              "size in your hand."));
+    AddWidget(devPath, "VrMaskReadout", WIDGET_CUSTOM).CustomFunction(VrMaskReadout).HideInSearch(true);
     AddWidget(buttonsPath, "Selector Hand", WIDGET_CVAR_COMBOBOX)
         .CVar("gVrItemSelHand")
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrItemSelect", 1); })
@@ -2314,7 +2539,7 @@ void SohMenu::AddMenuVRSettings() {
                      .DefaultValue(true)
                      .Tooltip("Reflect the shield hand's mesh so it reads as a left hand on the left "
                               "controller. Note the reflection also mirrors the shield's face design; "
-                              "pair with the Left Hand Override values to orient it correctly."));
+                              "pair with the Left Hand Override values (Comfort & Movement) to orient it correctly."));
     AddWidget(calPath, "Mirror Axis", WIDGET_CVAR_COMBOBOX)
         .CVar("gVrHandMirrorAxis")
         .Options(ComboboxOptions()
@@ -2324,100 +2549,7 @@ void SohMenu::AddMenuVRSettings() {
                               "axis: it must keep the finger direction and flip the thumb so the mesh reads "
                               "as the opposite hand. Try each if the hands look inside-out."));
 
-    AddWidget(calPath, "Hand Rotation", WIDGET_SEPARATOR_TEXT);
-    AddWidget(calPath, "Tune while looking at the SWORD hand - the other hand mirrors automatically.", WIDGET_TEXT);
-    AddWidget(calPath, "Pitch: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandCalPitch")
-        .Options(FloatSliderOptions()
-                     .Min(-180.0f)
-                     .Max(180.0f)
-                     .DefaultValue(88.0f)
-                     .Step(1.0f)
-                     .Format("%.1f")
-                     .Tooltip("Rotation about the grip X axis (wrist tilt up/down)."));
-    AddWidget(calPath, "Yaw: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandCalYaw")
-        .Options(FloatSliderOptions()
-                     .Min(-180.0f)
-                     .Max(180.0f)
-                     .DefaultValue(-100.0f)
-                     .Step(1.0f)
-                     .Format("%.1f")
-                     .Tooltip("Rotation about the grip Y axis. If the sword points backward or sideways "
-                              "out of your fist, adjust this first."));
-    AddWidget(calPath, "Roll: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandCalRoll")
-        .Options(FloatSliderOptions()
-                     .Min(-180.0f)
-                     .Max(180.0f)
-                     .DefaultValue(80.0f)
-                     .Step(1.0f)
-                     .Format("%.1f")
-                     .Tooltip("Rotation about the grip Z axis (twist around the handle - use to line up "
-                              "the blade edge and palm)."));
-
-    AddWidget(calPath, "Hand Position", WIDGET_SEPARATOR_TEXT);
-    AddWidget(calPath, "Offset X: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandOffX")
-        .Options(FloatSliderOptions()
-                     .Min(-30.0f)
-                     .Max(30.0f)
-                     .DefaultValue(0.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Slide the hand along the grip X axis (game units, tuned for the left "
-                              "controller; the right controller mirrors)."));
-    AddWidget(calPath, "Offset Y: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandOffY")
-        .Options(FloatSliderOptions()
-                     .Min(-30.0f)
-                     .Max(30.0f)
-                     .DefaultValue(0.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Slide the hand along the grip Y axis."));
-    AddWidget(calPath, "Offset Z: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandOffZ")
-        .Options(FloatSliderOptions()
-                     .Min(-30.0f)
-                     .Max(30.0f)
-                     .DefaultValue(0.0f)
-                     .Step(0.5f)
-                     .Format("%.1f")
-                     .Tooltip("Slide the hand along the grip Z axis (roughly along the handle)."));
-
     calPath.column = SECTION_COLUMN_2;
-    AddWidget(calPath, "Left Hand Override", WIDGET_SEPARATOR_TEXT);
-    AddWidget(calPath, "Tune Left Hand Separately", WIDGET_CVAR_CHECKBOX)
-        .CVar("gVrHandLOverride")
-        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
-            "By default the left controller's hand is derived from the values above by mirror symmetry. "
-            "If it doesn't look right, enable this and dial it in with its own values below."));
-    AddWidget(calPath, "L Pitch: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandLCalPitch")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
-        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(-149.0f).Step(1.0f).Format("%.1f"));
-    AddWidget(calPath, "L Yaw: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandLCalYaw")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
-        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(76.0f).Step(1.0f).Format("%.1f"));
-    AddWidget(calPath, "L Roll: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandLCalRoll")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
-        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(30.0f).Step(1.0f).Format("%.1f"));
-    AddWidget(calPath, "L Offset X: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandLOffX")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
-        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
-    AddWidget(calPath, "L Offset Y: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandLOffY")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
-        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
-    AddWidget(calPath, "L Offset Z: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHandLOffZ")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrHandLOverride", 1); })
-        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
-
     AddWidget(calPath, "Weapon Aim Trim", WIDGET_SEPARATOR_TEXT);
     AddWidget(calPath, "Aim Pitch: %.1f deg", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrAimCalPitch")
@@ -2536,10 +2668,10 @@ void SohMenu::AddMenuVRSettings() {
                      CVarGetInteger("gVrHandMirrorAxis", 2),
                      CVarGetFloat("gVrHandCalPitch", 88.0f), CVarGetFloat("gVrHandCalYaw", -100.0f),
                      CVarGetFloat("gVrHandCalRoll", 80.0f), CVarGetFloat("gVrHandOffX", 0.0f),
-                     CVarGetFloat("gVrHandOffY", 0.0f), CVarGetFloat("gVrHandOffZ", 0.0f),
+                     CVarGetFloat("gVrHandOffY", 6.3f), CVarGetFloat("gVrHandOffZ", 0.0f),
                      CVarGetInteger("gVrHandLOverride", 1), CVarGetFloat("gVrHandLCalPitch", -149.0f),
                      CVarGetFloat("gVrHandLCalYaw", 76.0f), CVarGetFloat("gVrHandLCalRoll", 30.0f),
-                     CVarGetFloat("gVrHandLOffX", 0.0f), CVarGetFloat("gVrHandLOffY", 0.0f),
+                     CVarGetFloat("gVrHandLOffX", 0.0f), CVarGetFloat("gVrHandLOffY", 6.3f),
                      CVarGetFloat("gVrHandLOffZ", 0.0f),
                      CVarGetFloat("gVrAimCalPitch", 0.0f), CVarGetFloat("gVrAimCalYaw", 0.0f),
                      CVarGetFloat("gVrAimOffX", 0.0f), CVarGetFloat("gVrAimOffY", 0.0f),

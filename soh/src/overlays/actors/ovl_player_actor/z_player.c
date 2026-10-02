@@ -2709,6 +2709,10 @@ void Player_UpdateItems(Player* this, PlayState* play) {
     // SOH [VR] Physical boomerang: pocket / virtual carry / throw / return-to-hand, from the
     // same boundary (no held actor exists for it, so it is not a VrItemThrow adapter).
     VrBoomerang_Tick(play, this);
+    // SOH [VR] Physical Lens of Truth: pocket / hand / worn on the face; wearing it is the toggle.
+    VrLens_Tick(play, this);
+    // SOH [VR] Physical masks: pocket / hand; on and off at the face (currentMask stays vanilla's).
+    VrMask_Tick(play, this);
     // SOH [VR] Bottle pour gesture (inverted + three shakes) commits contents through the
     // item button's own use path from this same boundary.
     VrBottle_Tick(play, this);
@@ -12513,17 +12517,18 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
             // #region SOH [VR] Roomscale 6DOF — physical headset translation moves Link's BODY, swept
             // against walls by the engine's own sphere-vs-wall check. We move only as far as the body
             // actually fits (the "achieved" amount) and report that back, so the camera anchor
-            // (bodyHead - achieved) keeps the eye continuous; anything the body can't reach stays as a
-            // head-lean ("head leans, body holds"). Gated to grounded + free locomotion. Rendering is
-            // untouched — this only changes Link's position.
+            // (bodyHead - achieved) keeps the eye continuous. Whatever the body can't reach is
+            // discarded by Play_Draw (VR_ClampRoomscaleLean): the camera never leans past Link.
+            // Gated to grounded + free locomotion. Rendering is untouched — this only changes
+            // Link's position.
             if (VR_IsInitialized() && VR_GetFirstPerson() && CVarGetInteger("gVrRoomscale", 1) &&
                 (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) && !Player_InBlockingCsMode(play, this) &&
                 !(this->stateFlags1 &
                   (PLAYER_STATE1_TALKING | PLAYER_STATE1_HANGING_OFF_LEDGE | PLAYER_STATE1_CLIMBING_LEDGE |
                    PLAYER_STATE1_CLIMBING_LADDER | PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_JUMPING |
                    PLAYER_STATE1_FREEFALL)) &&
-                // Hands on a block: the body is anchored to it — physical walking becomes head
-                // lean ("head leans, body holds") instead of dragging Link off the grab.
+                // Hands on a block: the body is anchored to it — physical walking is dropped
+                // instead of dragging Link off the grab.
                 !(this->stateFlags2 & (PLAYER_STATE2_DIVING | PLAYER_STATE2_GRABBING_DYNAPOLY))) {
                 float rsDesired[2];
                 VR_GetRoomscaleDesired(rsDesired);

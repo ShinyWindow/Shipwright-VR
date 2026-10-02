@@ -22,6 +22,16 @@ extern "C" {
 // back to vanilla when false, so scripted sequences behave stock frame-by-frame.
 bool VrCombat_Active(void);
 
+// Real-life hand scale (gVrRealHandScale, default on): the multiplier on Link's model scale for
+// the motion hands and everything drawn on them (z_player_lib.c VR_SetHandScale). The open hand,
+// wrist to fingertip, is drawn at a real size per age at ANY world scale, auto or manual: adult
+// gVrHandSizeCm (gLinkAdultLeftHandNearDL, 862 model units), child gVrHandSizeCmChild
+// (gLinkChildLeftHandNearDL, 548). 1 when off or out of VR (the hands then follow world scale, as
+// before). Items welded to the hand (nocked arrow, idle hookshot hook) take the same factor.
+// ChildSized: which age's size is in use (Link is a child).
+float VrHand_ScaleFactor(void);
+bool VrHand_ChildSized(void);
+
 // --- Physical melee (VrSwing.cpp) ---
 
 // The held melee weapon is handled by physical combat: swords (Master/Kokiri/Biggoron, incl.
@@ -198,16 +208,18 @@ bool VrOcarina_InPlay(void);
 // string->bow line while nocked (consumed by Player_VrAimHeldProjectile; false = fall back to
 // the one-hand aim ray). Reset clears transient nock state.
 bool VrArchery_Covers(struct Player* player);
-bool VrArchery_StringNocked(void);
 uint16_t VrArchery_ItemButtonMask(void);
 bool VrArchery_PinchConsumed(int32_t vrHand, uint16_t vrBtnMask);
 bool VrArchery_AimSegment(float* outPosDir6);
 void VrArchery_Reset(void);
-// Fairy Bow profile (geometry read off the bow model; the slingshot keeps its tuned anchor).
+// Fairy Bow profile (geometry read off the bow model, as the slingshot's pouch is).
 // BowStringNock: world point the drawn bowstring's apex belongs at (string hand, capped at max
 // draw); false when no bow nock is drawn. TakeBowShotPower: draw strength (0.3..1) of the bow
 // shot now leaving, consumed once by EnArrow_Shoot; 0 = not a physical bow shot (stay vanilla).
 bool VrArchery_BowStringNock(float* out3);
+// SlingshotPouch: world point the drawn slingshot band's pouch belongs at (string hand, capped
+// at 1.25 x full draw from the braced pouch); false when no slingshot nock is drawn.
+bool VrArchery_SlingshotPouch(float* out3);
 float VrArchery_TakeBowShotPower(void);
 // BowAlignedMatrix: while a bow nock is drawn, rewrites the bow hand's limb matrix (MtxF layout,
 // in place) so the bow points along the string hand -> arrow rest line; false = leave it raw.
@@ -314,6 +326,62 @@ void VrBoomerang_GetDebug(VrBoomerangDebug* out);
 struct EnBoom* Player_VrThrowBoomerang(struct PlayState* play, struct Player* player, const float* pos,
                                        const float* dir);
 
+// Physical Lens of Truth (VrLens.cpp — selector mode): selected, the lens model sits in the pocket;
+// a fresh grip takes it; held to the face it attaches (glued to the head) and turns the lens on
+// through the vanilla magic gate; a grip at the face takes it off; deselecting turns it off.
+// Covers: the lens selected in normal selector play (horse/water/minigames excluded; gVrPhysLens
+// toggles) — the trigger stands down while it covers. PreviewIsModel: the module draws the lens
+// (pocket / hand / face), the selector icon stands down. DrawAperture (Actor_DrawLensOverlay):
+// worn, the mask is drawn on a head-glued quad in the glass's plane instead of the screen rects;
+// false = not worn, draw the vanilla rects.
+bool VrLens_Covers(struct Player* player);
+void VrLens_Tick(struct PlayState* play, struct Player* player);
+void VrLens_Reset(void);
+bool VrLens_PreviewIsModel(void);
+bool VrLens_GripConsumed(int32_t hand, uint16_t mask);
+bool VrLens_DrawAperture(struct GraphicsContext* gfxCtx);
+void VrLens_Draw(void);
+typedef struct VrLensDebug {
+    int32_t state;         // 0 none, 1 pocket, 2 in hand, 3 worn
+    int32_t gate;          // 0 armed; 1 Physical Lens off; 2 lens not selected / not in normal play;
+                           // 3 cutscene / pause / Link busy (state kept); 4 no pocket point (headset untracked)
+    int32_t carryHand;     // -1 none, 0 left, 1 right
+    int32_t armed;         // in hand: has been away from the face, may be put on
+    float glassToFaceCm;   // in hand: glass center -> worn spot (-1 = not measured)
+    float wearDistanceCm;  // puts on within this
+    int32_t lensActive;    // play->actorCtx.lensActive
+    int32_t lastActivate;  // -1 none yet, 0 refused (no magic / magic busy), 1 on
+    int32_t ours;          // this module turned the lens on
+} VrLensDebug;
+void VrLens_GetDebug(VrLensDebug* out);
+
+// Physical masks (VrMask.cpp — selector mode): the lens mechanic for every mask, but the worn
+// state is vanilla's currentMask, so a worn mask stays on through item switches. Selected (and not
+// already worn), the mask's model sits in the pocket; a fresh grip takes it; at the face it goes on
+// (replacing any other mask). A fresh grip at the face takes the worn mask off into that hand, any
+// time, unless another item owns that grip. Covers: a mask selected in normal selector play
+// (gVrPhysMasks toggles) — the trigger stands down. PreviewIsModel: the selector icon stands down.
+bool VrMask_Covers(struct Player* player);
+void VrMask_Tick(struct PlayState* play, struct Player* player);
+void VrMask_Reset(void);
+bool VrMask_PreviewIsModel(void);
+bool VrMask_GripConsumed(int32_t hand, uint16_t mask);
+void VrMask_Draw(void);
+typedef struct VrMaskDebug {
+    int32_t state;        // 0 none, 1 pocket, 2 in hand
+    int32_t gate;         // 0 armed; 1 Physical Masks off; 2 not in selector play (or horse / water /
+                          // minigame); 3 cutscene / pause / Link busy (state kept)
+    int32_t carryHand;    // -1 none, 0 left, 1 right
+    int32_t selected;     // PLAYER_MASK_* of the selected mask (0 none)
+    int32_t held;         // PLAYER_MASK_* in the hand (0 none)
+    float maskToFaceCm;   // in hand: mask middle -> face spot (-1 = not measured)
+    float wearDistanceCm; // goes on within this
+    int32_t worn;         // player->currentMask
+    int32_t armed;        // in hand: has been away from the face
+    int32_t lastWorn;     // last mask this module put on (-1 none yet)
+} VrMaskDebug;
+void VrMask_GetDebug(VrMaskDebug* out);
+
 // Two-trigger spell casting (VrMagic.cpp — selector mode): Din's Fire, Farore's Wind, Nayru's
 // Love cast only while BOTH triggers are down (VrItemSelect_TriggerItemMask withholds the spell's
 // button otherwise). Covers: a spell selected in normal selector play (horse/water/minigames
@@ -355,10 +423,10 @@ void VrHookshot_NoteAim(struct Player* player, struct Actor* hook, int32_t vrHan
                         float rangeUnits);
 // Hookshot-only aim trim, applied by Player_VrAimHeldProjectile on top of the shared Weapon Aim
 // Trim, to the aim ray (pos/dir, world units) of the controller holding the hookshot:
-// gVrHookshotAimPitch/Yaw (degrees, up/right) turn the direction, gVrHookshotAimRight/Up/Fwd (cm,
-// in the controller's frame) move the launch point. Right and yaw mirror when the hookshot is in
-// the left controller, so a tuned value means the same thing in either hand. The laser and the
-// reticle trace the hook's resulting line, so they follow the trim.
+// gVrHookshotAimPitch/Yaw (degrees, up/right) turn the direction; the launch point is left alone
+// (it is the barrel, read off the model). Yaw mirrors when the hookshot is in the left controller,
+// so a tuned value means the same thing in either hand. The laser and the reticle trace the hook's
+// resulting line, so they follow the trim.
 void VrHookshot_TrimAimRay(int32_t vrHand, float* pos3, float* dir3);
 // BarrelAim (gVrHookshotBarrelAim, default on): the hook aims from the hookshot MODEL — the
 // vanilla in-hand hook transform, which the controller-driven R_HAND limb already carries — so it
@@ -368,6 +436,9 @@ void VrHookshot_TrimAimRay(int32_t vrHand, float* pos3, float* dir3);
 // its stub of chain ride the controller at headset rate instead of trailing at the 20 Hz tick.
 bool VrHookshot_BarrelAim(void);
 void VrHookshot_WeldIdleHook(struct Actor* hook, const void* mtx);
+// IdleWelded: true while this hook is drawn welded to the hand (same gate as WeldIdleHook), so
+// ArmsHook_Draw can size it with the hand (VrHand_ScaleFactor).
+bool VrHookshot_IdleWelded(struct Actor* hook);
 
 #ifdef __cplusplus
 }

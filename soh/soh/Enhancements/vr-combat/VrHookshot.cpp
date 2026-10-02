@@ -104,10 +104,8 @@ extern "C" void VrHookshot_TrimAimRay(int32_t vrHand, float* pos3, float* dir3) 
     const float mirror = (vrHand == VR_HAND_LEFT) ? -1.0f : 1.0f;
     const float yaw = CVarGetFloat("gVrHookshotAimYaw", 0.0f) * mirror * kDeg;
     const float pitch = CVarGetFloat("gVrHookshotAimPitch", 0.0f) * kDeg;
-    const float offRight = CVarGetFloat("gVrHookshotAimRight", 0.0f) * mirror;
-    const float offUp = CVarGetFloat("gVrHookshotAimUp", 0.0f);
-    const float offFwd = CVarGetFloat("gVrHookshotAimFwd", 0.0f);
-    if (yaw == 0.0f && pitch == 0.0f && offRight == 0.0f && offUp == 0.0f && offFwd == 0.0f) {
+    (void)pos3; // the launch point is the barrel (model space); only the direction is trimmed
+    if (yaw == 0.0f && pitch == 0.0f) {
         return;
     }
 
@@ -146,16 +144,6 @@ extern "C" void VrHookshot_TrimAimRay(int32_t vrHand, float* pos3, float* dir3) 
     const float up[3] = { right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2],
                           right[0] * fwd[1] - right[1] * fwd[0] };
 
-    // Launch point: centimetres in the controller-fixed frame (before the angle trim).
-    float ws = VR_GetWorldScale();
-    if (ws < 1.0f) {
-        ws = 35.0f;
-    }
-    const float cm = 0.01f * ws;
-    for (int i = 0; i < 3; i++) {
-        pos3[i] += (right[i] * offRight + up[i] * offUp + fwd[i] * offFwd) * cm;
-    }
-
     // Direction: yaw about up (positive = right), then pitch about the turned right axis
     // (positive = up). Up stays perpendicular to the turned pair, so the pitch is exact.
     for (int i = 0; i < 3; i++) {
@@ -181,12 +169,16 @@ extern "C" void VrHookshot_NoteAim(Player* player, Actor* hook, int32_t vrHand, 
     sNote.hook = hook;
 }
 
+extern "C" bool VrHookshot_IdleWelded(Actor* hook) {
+    return gPlayState != nullptr && hook != nullptr && hook == sNote.hook &&
+           sNote.frame == (s32)gPlayState->state.frames && sNote.hasHandMtx;
+}
+
 extern "C" void VrHookshot_WeldIdleHook(Actor* hook, const void* mtx) {
     // Only the hook this frame's aim was noted for (idle in the hand, the aim override ran and
     // the hand's 20 Hz snapshot exists): the hand-LOCAL part of the matrix being drawn, against
     // that same snapshot, re-composed with the live hand pose per eye by the interpreter.
-    if (gPlayState == nullptr || hook == nullptr || mtx == nullptr || hook != sNote.hook ||
-        sNote.frame != (s32)gPlayState->state.frames || !sNote.hasHandMtx) {
+    if (mtx == nullptr || !VrHookshot_IdleWelded(hook)) {
         return;
     }
     MtxF cur;
