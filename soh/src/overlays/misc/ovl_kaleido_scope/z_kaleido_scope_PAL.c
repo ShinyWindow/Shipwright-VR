@@ -23,6 +23,7 @@
 #include "soh/SaveManager.h"
 #include "soh/Enhancements/kaleido.h"
 #include <soh_assets.h>
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 static void* sEquipmentFRATexs[] = {
     gPauseEquipment00FRATex, gPauseEquipment01Tex, gPauseEquipment02Tex, gPauseEquipment03Tex, gPauseEquipment04Tex,
@@ -1420,6 +1421,16 @@ Gfx* KaleidoScope_DrawPageSections(Gfx* gfx, Vtx* vertices, void** textures) {
     return gfx;
 }
 
+// SOH [VR] Page placement. In the world-space pause menu (VrPause.cpp) each page rides the box
+// around the player's head; otherwise this is the vanilla Matrix_Translate(x, y, z, MTXMODE_NEW).
+static void KaleidoScope_PageTranslate(f32 x, f32 y, f32 z) {
+    if (VrPause_WorldSpace()) {
+        VrPause_PageTranslate(x, y, z);
+    } else {
+        Matrix_Translate(x, y, z, MTXMODE_NEW);
+    }
+}
+
 void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
     static Color_RGB8 D_8082ACF4[12] = {
         { 0, 0, 0 }, { 0, 0, 0 },     { 0, 0, 0 },    { 0, 0, 0 }, { 255, 255, 0 }, { 0, 0, 0 },
@@ -1592,7 +1603,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
             gDPPipeSync(OVERLAY_DISP++);
             gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATEIA, G_CC_MODULATEIA);
 
-            Matrix_Translate(0.0f, (f32)WREG(2) / 100.0f, -(f32)WREG(3) / 100.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate(0.0f, (f32)WREG(2) / 100.0f, -(f32)WREG(3) / 100.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateX(-pauseCtx->unk_1F4 / 100.0f, MTXMODE_APPLY);
 
@@ -1608,7 +1619,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
             gDPPipeSync(POLY_OPA_DISP++);
             gDPSetCombineMode(POLY_OPA_DISP++, G_CC_MODULATEIA, G_CC_MODULATEIA);
 
-            Matrix_Translate(-(f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate(-(f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateZ(pauseCtx->unk_1F8 / 100.0f, MTXMODE_APPLY);
             Matrix_RotateY(1.57f, MTXMODE_APPLY);
@@ -1626,7 +1637,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
             gDPSetTextureFilter(POLY_OPA_DISP++, G_TF_BILERP);
             gDPSetCombineMode(POLY_OPA_DISP++, G_CC_MODULATEIA, G_CC_MODULATEIA);
 
-            Matrix_Translate(0.0f, (f32)WREG(2) / 100.0f, (f32)WREG(3) / 100.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate(0.0f, (f32)WREG(2) / 100.0f, (f32)WREG(3) / 100.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateX(pauseCtx->unk_200 / 100.0f, MTXMODE_APPLY);
             Matrix_RotateY(3.14f, MTXMODE_APPLY);
@@ -1648,7 +1659,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
 
             gDPSetCombineMode(POLY_OPA_DISP++, G_CC_MODULATEIA, G_CC_MODULATEIA);
 
-            Matrix_Translate((f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate((f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateZ(-pauseCtx->unk_1FC / 100.0f, MTXMODE_APPLY);
             Matrix_RotateY(-1.57f, MTXMODE_APPLY);
@@ -1677,7 +1688,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
 
         switch (pauseCtx->pageIndex) {
             case PAUSE_ITEM:
-                Matrix_Translate(0.0f, (f32)WREG(2) / 100.0f, -(f32)WREG(3) / 100.0f, MTXMODE_NEW);
+                KaleidoScope_PageTranslate(0.0f, (f32)WREG(2) / 100.0f, -(f32)WREG(3) / 100.0f);
                 Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
                 Matrix_RotateX(-pauseCtx->unk_1F4 / 100.0f, MTXMODE_APPLY);
 
@@ -1690,7 +1701,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
                 break;
 
             case PAUSE_MAP:
-                Matrix_Translate((f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f, MTXMODE_NEW);
+                KaleidoScope_PageTranslate((f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f);
                 Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
                 Matrix_RotateZ(-pauseCtx->unk_1FC / 100.0f, MTXMODE_APPLY);
                 Matrix_RotateY(-1.57f, MTXMODE_APPLY);
@@ -1721,7 +1732,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
             case PAUSE_QUEST:
                 gDPSetTextureFilter(POLY_OPA_DISP++, G_TF_BILERP);
 
-                Matrix_Translate(0.0f, (f32)WREG(2) / 100.0f, (f32)WREG(3) / 100.0f, MTXMODE_NEW);
+                KaleidoScope_PageTranslate(0.0f, (f32)WREG(2) / 100.0f, (f32)WREG(3) / 100.0f);
                 Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
                 Matrix_RotateX(pauseCtx->unk_200 / 100.0f, MTXMODE_APPLY);
                 Matrix_RotateY(3.14f, MTXMODE_APPLY);
@@ -1743,7 +1754,7 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
                 break;
 
             case PAUSE_EQUIP:
-                Matrix_Translate(-(f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f, MTXMODE_NEW);
+                KaleidoScope_PageTranslate(-(f32)WREG(3) / 100.0f, (f32)WREG(2) / 100.0f, 0.0f);
                 Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
                 Matrix_RotateZ(pauseCtx->unk_1F8 / 100.0f, MTXMODE_APPLY);
                 Matrix_RotateY(1.57f, MTXMODE_APPLY);
@@ -1773,27 +1784,27 @@ void KaleidoScope_DrawPages(PlayState* play, GraphicsContext* gfxCtx) {
         if (!pauseCtx->pageIndex) { // pageIndex == PAUSE_ITEM
             pauseCtx->unk_1F4 = pauseCtx->unk_204 + 314.0f;
 
-            Matrix_Translate(0.0f, (f32)WREG(2) / 100.0f, -pauseCtx->unk_1F0 / 10.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate(0.0f, (f32)WREG(2) / 100.0f, -pauseCtx->unk_1F0 / 10.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateX(-pauseCtx->unk_204 / 100.0f, MTXMODE_APPLY);
         } else if (pauseCtx->pageIndex == PAUSE_MAP) {
             pauseCtx->unk_1FC = pauseCtx->unk_204 + 314.0f;
 
-            Matrix_Translate(pauseCtx->unk_1F0 / 10.0f, (f32)WREG(2) / 100.0f, 0.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate(pauseCtx->unk_1F0 / 10.0f, (f32)WREG(2) / 100.0f, 0.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateZ(-pauseCtx->unk_204 / 100.0f, MTXMODE_APPLY);
             Matrix_RotateY(-1.57f, MTXMODE_APPLY);
         } else if (pauseCtx->pageIndex == PAUSE_QUEST) {
             pauseCtx->unk_200 = pauseCtx->unk_204 + 314.0f;
 
-            Matrix_Translate(0.0f, (f32)WREG(2) / 100.0f, pauseCtx->unk_1F0 / 10.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate(0.0f, (f32)WREG(2) / 100.0f, pauseCtx->unk_1F0 / 10.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateX(pauseCtx->unk_204 / 100.0f, MTXMODE_APPLY);
             Matrix_RotateY(3.14f, MTXMODE_APPLY);
         } else {
             pauseCtx->unk_1F8 = pauseCtx->unk_204 + 314.0f;
 
-            Matrix_Translate(-pauseCtx->unk_1F0 / 10.0f, (f32)WREG(2) / 100.0f, 0.0f, MTXMODE_NEW);
+            KaleidoScope_PageTranslate(-pauseCtx->unk_1F0 / 10.0f, (f32)WREG(2) / 100.0f, 0.0f);
             Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
             Matrix_RotateZ(pauseCtx->unk_204 / 100.0f, MTXMODE_APPLY);
             Matrix_RotateY(1.57f, MTXMODE_APPLY);
@@ -2101,7 +2112,12 @@ void KaleidoScope_DrawInfoPanel(PlayState* play) {
 
     gDPSetCombineMode(POLY_OPA_DISP++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
 
-    Matrix_Translate(0.0f, 0.0f, -144.0f, MTXMODE_NEW);
+    // SOH [VR] World-space pause: the panel sits just under the box's front page (VrPause.cpp).
+    if (VrPause_WorldSpace()) {
+        VrPause_PanelMatrix();
+    } else {
+        Matrix_Translate(0.0f, 0.0f, -144.0f, MTXMODE_NEW);
+    }
     Matrix_Scale(1.0f, 1.0f, 1.0f, MTXMODE_APPLY);
 
     gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
@@ -2327,7 +2343,38 @@ void KaleidoScope_DrawInfoPanel(PlayState* play) {
                 int height_factor = (1 << 10) * icon_h / height;
                 int width_factor = (1 << 10) * icon_w / width;
                 gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, cButtonsColor.r, cButtonsColor.g, cButtonsColor.b, 255);
-                for (s16 i = 0; i < 3; i++) {
+                // SOH [VR] World-space pause: a screen rectangle would stick to each eye's screen, so
+                // the same three colored crops are drawn as quads on the panel (vanilla's C-icon
+                // slot, vertices 16..19), then the panel vertices are reloaded for "to equip".
+                if (VrPause_WorldSpace()) {
+                    static const s16 sVrCropWidths[3] = { 17 * 3 - 3, 17 * 2 - 3, 17 };
+                    Vtx* cBtnVtx = Graph_Alloc(play->state.gfxCtx, 12 * sizeof(Vtx));
+                    for (s16 i = 0; i < 3; i++) {
+                        for (s16 k = 0; k < 4; k++) {
+                            cBtnVtx[i * 4 + k] = pauseCtx->infoPanelVtx[16 + k];
+                        }
+                        cBtnVtx[i * 4 + 1].v.ob[0] = cBtnVtx[i * 4 + 3].v.ob[0] =
+                            cBtnVtx[i * 4 + 0].v.ob[0] + sVrCropWidths[i];
+                        cBtnVtx[i * 4 + 1].v.tc[0] = cBtnVtx[i * 4 + 3].v.tc[0] = sVrCropWidths[i] << 5;
+                    }
+                    gSPVertex(POLY_OPA_DISP++, cBtnVtx, 12, 0);
+                    for (s16 i = 0; i < 3; i++) {
+                        if (i == 0) {
+                            gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, cRightButtonColor.r, cRightButtonColor.g,
+                                            cRightButtonColor.b, 255);
+                        } else if (i == 1) {
+                            gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, cDownButtonColor.r, cDownButtonColor.g,
+                                            cDownButtonColor.b, 255);
+                        } else {
+                            gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, cLeftButtonColor.r, cLeftButtonColor.g,
+                                            cLeftButtonColor.b, 255);
+                        }
+                        POLY_OPA_DISP =
+                            KaleidoScope_QuadTextureIA8(POLY_OPA_DISP, gCBtnSymbolsTex, icon_w, icon_h, i * 4);
+                    }
+                    gSPVertex(POLY_OPA_DISP++, &pauseCtx->infoPanelVtx[16], 8, 0);
+                }
+                for (s16 i = 0; i < 3 && !VrPause_WorldSpace(); i++) {
                     if (i == 0) {
                         icon_x_offset = width_crop * 3 - 3;
                         gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, cRightButtonColor.r, cRightButtonColor.g,
@@ -3500,11 +3547,23 @@ void KaleidoScope_Draw(PlayState* play) {
     Input* input = &play->state.input[0];
     PauseContext* pauseCtx = &play->pauseCtx;
     InterfaceContext* interfaceCtx = &play->interfaceCtx;
+    Gfx* vrPauseBranch = NULL;
 
     OPEN_DISPS(play->state.gfxCtx);
 
     pauseCtx->stickRelX = input->rel.stick_x;
     pauseCtx->stickRelY = input->rel.stick_y;
+
+    // SOH [VR] World-space pause (VrPause.cpp): the menu must draw AFTER the frozen world's
+    // translucent pass, or water, glows and effects would paint over the pages. Build it as a
+    // sub-display list inside the OPA buffer (the OPA list branches over it) and call it from the
+    // end of POLY_XLU, the Play_Draw transition-overlay pattern; everything below still writes
+    // POLY_OPA_DISP unchanged.
+    if (VrPause_WorldSpace()) {
+        vrPauseBranch = POLY_OPA_DISP;
+        POLY_OPA_DISP = Graph_GfxPlusOne(vrPauseBranch);
+        gSPDisplayList(POLY_XLU_DISP++, POLY_OPA_DISP);
+    }
 
     // gSPSegment(POLY_OPA_DISP++, 0x02, interfaceCtx->parameterSegment);
     gSPSegment(POLY_OPA_DISP++, 0x07, pauseCtx->playerSegment);
@@ -3516,6 +3575,11 @@ void KaleidoScope_Draw(PlayState* play) {
 
     if (pauseCtx->debugState == 0) {
         KaleidoScope_SetView(pauseCtx, pauseCtx->eye.x, pauseCtx->eye.y, pauseCtx->eye.z);
+
+        // SOH [VR] Anchor the box on the first draw of a pause, follow the page orbit, dim the world.
+        if (vrPauseBranch != NULL) {
+            VrPause_BeginDraw(play);
+        }
 
         Gfx_SetupDL_42Opa(play->state.gfxCtx);
         KaleidoScope_InitVertices(play, play->state.gfxCtx);
@@ -3538,6 +3602,11 @@ void KaleidoScope_Draw(PlayState* play) {
 
     if ((pauseCtx->debugState == 1) || (pauseCtx->debugState == 2)) {
         KaleidoScope_DrawDebugEditor(play);
+    }
+
+    if (vrPauseBranch != NULL) {
+        gSPEndDisplayList(POLY_OPA_DISP++);
+        Graph_BranchDlist(vrPauseBranch, POLY_OPA_DISP);
     }
 
     func_800AAA50(&play->view, 15);

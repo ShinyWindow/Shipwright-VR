@@ -24,6 +24,9 @@
 #include "soh/ObjectExtension/ActorMaximumHealth.h"
 
 #include "message_data_static.h"
+#include <vr_interface.h> // SOH [VR] HUD element markers
+
+static void Interface_VrHudGroup(PlayState* play, s32 element, s32 alpha); // SOH [VR]
 extern MessageTableEntry* sNesMessageEntryTablePtr;
 extern MessageTableEntry* sGerMessageEntryTablePtr;
 extern MessageTableEntry* sFraMessageEntryTablePtr;
@@ -4143,6 +4146,7 @@ void Interface_DrawItemButtons(PlayState* play) {
 
     // B Button Color & Texture
     // Also loads the Item Button Texture reused by other buttons afterwards
+    Interface_VrHudGroup(play, VR_HUD_EL_BTN_B, interfaceCtx->bAlpha); // SOH [VR]
     gDPPipeSync(OVERLAY_DISP++);
     gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, bButtonColor.r, bButtonColor.g, bButtonColor.b, interfaceCtx->bAlpha);
@@ -4152,6 +4156,7 @@ void Interface_DrawItemButtons(PlayState* play) {
                                   BBtnScaled, BBtnScaled, BBtn_factor, BBtn_factor);
 
     // C-Left Button Color & Texture
+    Interface_VrHudGroup(play, VR_HUD_EL_BTN_C_LEFT, interfaceCtx->cLeftAlpha); // SOH [VR]
     gDPPipeSync(OVERLAY_DISP++);
     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, cLeftButtonColor.r, cLeftButtonColor.g, cLeftButtonColor.b,
                     interfaceCtx->cLeftAlpha);
@@ -4161,6 +4166,7 @@ void Interface_DrawItemButtons(PlayState* play) {
                             R_ITEM_BTN_DD(1) << 1, R_ITEM_BTN_DD(1) << 1);
 
     // C-Down Button Color & Texture
+    Interface_VrHudGroup(play, VR_HUD_EL_BTN_C_DOWN, interfaceCtx->cDownAlpha); // SOH [VR]
     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, cDownButtonColor.r, cDownButtonColor.g, cDownButtonColor.b,
                     interfaceCtx->cDownAlpha);
     gSPWideTextureRectangle(OVERLAY_DISP++, C_Down_BTN_Pos[0] << 2, C_Down_BTN_Pos[1] << 2,
@@ -4169,6 +4175,7 @@ void Interface_DrawItemButtons(PlayState* play) {
                             R_ITEM_BTN_DD(2) << 1, R_ITEM_BTN_DD(2) << 1);
 
     // C-Right Button Color & Texture
+    Interface_VrHudGroup(play, VR_HUD_EL_BTN_C_RIGHT, interfaceCtx->cRightAlpha); // SOH [VR]
     gDPSetPrimColor(OVERLAY_DISP++, 0, 0, cRightButtonColor.r, cRightButtonColor.g, cRightButtonColor.b,
                     interfaceCtx->cRightAlpha);
     gSPWideTextureRectangle(OVERLAY_DISP++, C_Right_BTN_Pos[0] << 2, C_Right_BTN_Pos[1] << 2,
@@ -4179,6 +4186,7 @@ void Interface_DrawItemButtons(PlayState* play) {
     if ((pauseCtx->state < 8) || (pauseCtx->state >= 18)) {
         if ((play->pauseCtx.state != 0) || (play->pauseCtx.debugState != 0)) {
             // Start Button Texture, Color & Label
+            Interface_VrHudGroup(play, VR_HUD_EL_BTN_START, interfaceCtx->startAlpha); // SOH [VR]
             gDPPipeSync(OVERLAY_DISP++);
 
             gDPSetPrimColor(OVERLAY_DISP++, 0, 0, startButtonColor.r, startButtonColor.g, startButtonColor.b,
@@ -4230,6 +4238,7 @@ void Interface_DrawItemButtons(PlayState* play) {
                 temp = interfaceCtx->healthAlpha;
             }
 
+            Interface_VrHudGroup(play, VR_HUD_EL_BTN_C_UP, temp); // SOH [VR] Navi prompt
             gDPSetPrimColor(OVERLAY_DISP++, 0, 0, cUpButtonColor.r, cUpButtonColor.g, cUpButtonColor.b, temp);
             gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
             gSPWideTextureRectangle(OVERLAY_DISP++, C_Up_BTN_Pos[0] << 2, C_Up_BTN_Pos[1] << 2,
@@ -4379,6 +4388,14 @@ void Interface_DrawItemButtons(PlayState* play) {
                 ItemIconPos[2][1] = ItemIconPos_ori[2][1];
             }
 
+            // SOH [VR] the empty-slot arrow belongs to its C button
+            Interface_VrHudGroup(play,
+                                 temp == 1   ? VR_HUD_EL_BTN_C_LEFT
+                                 : temp == 2 ? VR_HUD_EL_BTN_C_DOWN
+                                             : VR_HUD_EL_BTN_C_RIGHT,
+                                 temp == 1   ? interfaceCtx->cLeftAlpha
+                                 : temp == 2 ? interfaceCtx->cDownAlpha
+                                             : interfaceCtx->cRightAlpha);
             if (temp == 1) {
                 gDPSetPrimColor(OVERLAY_DISP++, 0, 0, cLeftButtonColor.r, cLeftButtonColor.g, cLeftButtonColor.b,
                                 interfaceCtx->cLeftAlpha);
@@ -5084,6 +5101,19 @@ const char* digitTextures[] = { gCounterDigit0Tex, gCounterDigit1Tex, gCounterDi
                                 gCounterDigit2Tex, gCounterDigit3Tex, gCounterDigit4Tex, gCounterDigit5Tex,
                                 gCounterDigit6Tex, gCounterDigit7Tex, gCounterDigit8Tex };
 
+// SOH [VR] Tag the following overlay commands as one HUD element (VR_HUD_MARKER, vr_interface.h).
+// The VR HUD pass uses the tags to lift each element off its TV position and lay it out on its
+// hand's wrist canvas, fading the canvas backing with `alpha` (the element's vanilla fade). Nothing
+// is emitted outside VR, so flat display lists stay vanilla.
+static void Interface_VrHudGroup(PlayState* play, s32 element, s32 alpha) {
+    if (!VR_IsInitialized()) {
+        return;
+    }
+    OPEN_DISPS(play->state.gfxCtx);
+    gSPVrPhysMask(OVERLAY_DISP++, VR_HUD_MARKER(element, CLAMP(alpha, 0, 255)));
+    CLOSE_DISPS(play->state.gfxCtx);
+}
+
 void Interface_Draw(PlayState* play) {
     static s16 magicArrowEffectsR[] = { 255, 100, 255 };
     static s16 magicArrowEffectsG[] = { 0, 100, 255 };
@@ -5156,6 +5186,10 @@ void Interface_Draw(PlayState* play) {
 
     OPEN_DISPS(play->state.gfxCtx);
 
+    if (VR_IsInitialized()) { // SOH [VR] picks the Adult / Child wrist HUD layout
+        VR_SetHudChild(LINK_IS_CHILD);
+    }
+
     gSPSegment(OVERLAY_DISP++, 0x02, interfaceCtx->parameterSegment);
     gSPSegment(OVERLAY_DISP++, 0x07, interfaceCtx->doActionSegment);
     gSPSegment(OVERLAY_DISP++, 0x08, interfaceCtx->iconItemSegment);
@@ -5164,9 +5198,11 @@ void Interface_Draw(PlayState* play) {
     if (pauseCtx->debugState == 0) {
         Interface_InitVertices(play);
         func_8008A994(interfaceCtx);
+        Interface_VrHudGroup(play, VR_HUD_EL_HEARTS, interfaceCtx->healthAlpha); // SOH [VR]
         if (fullUi || gSaveContext.health != gSaveContext.healthCapacity) {
             HealthMeter_Draw(play);
         }
+        Interface_VrHudGroup(play, VR_HUD_EL_RUPEES, interfaceCtx->magicAlpha); // SOH [VR] icon (+ counter below)
 
         Gfx_SetupDL_39Overlay(play->state.gfxCtx);
 
@@ -5316,6 +5352,7 @@ void Interface_Draw(PlayState* play) {
                                 PosX_SKC = PosX_SKC_ori;
                             }
                             // Small Key Icon
+                            Interface_VrHudGroup(play, VR_HUD_EL_KEYS, interfaceCtx->magicAlpha); // SOH [VR]
                             gDPPipeSync(OVERLAY_DISP++);
 
                             gDPSetPrimColor(OVERLAY_DISP++, 0, 0, keyCountColor.r, keyCountColor.g, keyCountColor.b,
@@ -5359,6 +5396,7 @@ void Interface_Draw(PlayState* play) {
 
             if (GameInteractor_Should(VB_RENDER_RUPEE_COUNTER, true)) {
                 // Rupee Counter
+                Interface_VrHudGroup(play, VR_HUD_EL_RUPEES, interfaceCtx->magicAlpha); // SOH [VR]
                 gDPPipeSync(OVERLAY_DISP++);
 
                 if (gSaveContext.rupees == CUR_CAPACITY(UPG_WALLET)) {
@@ -5403,16 +5441,22 @@ void Interface_Draw(PlayState* play) {
             gDPSetEnvColor(OVERLAY_DISP++, 0, 0, 0, 0);
         }
 
+        Interface_VrHudGroup(play, VR_HUD_EL_OTHER, 255); // SOH [VR]
         if (CVarGetInteger(CVAR_ENHANCEMENT("DrawLineupTick"), 0)) {
             Interface_DrawLineupTick(play);
         }
 
+        Interface_VrHudGroup(play, VR_HUD_EL_MAGIC, interfaceCtx->magicAlpha); // SOH [VR]
         if (fullUi || gSaveContext.magicState > MAGIC_STATE_IDLE) {
             Interface_DrawMagicBar(play);
         }
 
+        Interface_VrHudGroup(play, VR_HUD_EL_MINIMAP, interfaceCtx->minimapAlpha); // SOH [VR]
         Minimap_Draw(play);
 
+        // SOH [VR] lock-on (screen-space fallback) and the enemy bar: positions on the screen mean
+        // nothing on a wrist
+        Interface_VrHudGroup(play, VR_HUD_EL_OTHER, 255);
         if ((R_PAUSE_MENU_MODE != 2) && (R_PAUSE_MENU_MODE != 3)) {
             if (CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0)) {
                 gSPMatrix(OVERLAY_DISP++, interfaceCtx->view.projectionFlippedPtr,
@@ -5430,7 +5474,7 @@ void Interface_Draw(PlayState* play) {
             }
         }
 
-        Gfx_SetupDL_39Overlay(play->state.gfxCtx);
+        Gfx_SetupDL_39Overlay(play->state.gfxCtx); // (button circles are tagged one by one inside)
 
         if (fullUi) {
             Interface_DrawItemButtons(play);
@@ -5440,6 +5484,7 @@ void Interface_Draw(PlayState* play) {
         gDPSetPrimColor(OVERLAY_DISP++, 0, 0, 255, 255, 255, interfaceCtx->bAlpha);
         gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
 
+        Interface_VrHudGroup(play, VR_HUD_EL_BTN_B, interfaceCtx->bAlpha); // SOH [VR] item + ammo or label
         if (!(interfaceCtx->unk_1FA)) {
             // B Button Icon & Ammo Count
             if (gSaveContext.equips.buttonItems[0] != ITEM_NONE) {
@@ -5529,6 +5574,7 @@ void Interface_Draw(PlayState* play) {
         gDPPipeSync(OVERLAY_DISP++);
 
         // C-Left Button Icon & Ammo Count
+        Interface_VrHudGroup(play, VR_HUD_EL_BTN_C_LEFT, interfaceCtx->cLeftAlpha); // SOH [VR]
         if (gSaveContext.equips.buttonItems[1] < 0xF0) {
             gDPSetPrimColor(OVERLAY_DISP++, 0, 0, 255, 255, 255, interfaceCtx->cLeftAlpha);
             gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
@@ -5542,6 +5588,7 @@ void Interface_Draw(PlayState* play) {
         gDPPipeSync(OVERLAY_DISP++);
 
         // C-Down Button Icon & Ammo Count
+        Interface_VrHudGroup(play, VR_HUD_EL_BTN_C_DOWN, interfaceCtx->cDownAlpha); // SOH [VR]
         if (gSaveContext.equips.buttonItems[2] < 0xF0) {
             gDPSetPrimColor(OVERLAY_DISP++, 0, 0, 255, 255, 255, interfaceCtx->cDownAlpha);
             gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
@@ -5555,6 +5602,7 @@ void Interface_Draw(PlayState* play) {
         gDPPipeSync(OVERLAY_DISP++);
 
         // C-Right Button Icon & Ammo Count
+        Interface_VrHudGroup(play, VR_HUD_EL_BTN_C_RIGHT, interfaceCtx->cRightAlpha); // SOH [VR]
         if (gSaveContext.equips.buttonItems[3] < 0xF0) {
             gDPSetPrimColor(OVERLAY_DISP++, 0, 0, 255, 255, 255, interfaceCtx->cRightAlpha);
             gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
@@ -5572,6 +5620,7 @@ void Interface_Draw(PlayState* play) {
                     interfaceCtx->dpadRightAlpha);
 
             // Draw DPad
+            Interface_VrHudGroup(play, VR_HUD_EL_BTN_DPAD, dpadAlpha); // SOH [VR] pad + its four items
             s16 DpadPosX;
             s16 DpadPosY;
             s16 X_Margins_Dpad;
@@ -5666,6 +5715,7 @@ void Interface_Draw(PlayState* play) {
         }
 
         // A Button
+        Interface_VrHudGroup(play, VR_HUD_EL_BTN_A, interfaceCtx->aAlpha); // SOH [VR] button + action label
         Gfx_SetupDL_42Overlay(play->state.gfxCtx);
         s16 X_Margins_BtnA;
         s16 Y_Margins_BtnA;
@@ -5745,6 +5795,9 @@ void Interface_Draw(PlayState* play) {
         func_8008A994(interfaceCtx);
         svar3 = 16;
 
+        // SOH [VR] the pause equip fly-in: on the world-space pause frame only (it starts at the
+        // inventory slot, which that frame lines up with the front page)
+        Interface_VrHudGroup(play, VR_HUD_EL_PAUSE_FX, 255);
         if ((pauseCtx->state == 6) && (pauseCtx->unk_1E4 == 3)) {
             // Inventory Equip Effects
             gSPSegment(OVERLAY_DISP++, 0x08, pauseCtx->iconItemSegment);
@@ -5794,6 +5847,8 @@ void Interface_Draw(PlayState* play) {
             gSP1Quadrangle(OVERLAY_DISP++, 0, 2, 3, 1, 0);
         }
 
+        // SOH [VR] Epona's carrots (aAlpha) and the horseback archery score (bAlpha)
+        Interface_VrHudGroup(play, VR_HUD_EL_MOUNT, MAX(interfaceCtx->aAlpha, interfaceCtx->bAlpha));
         Gfx_SetupDL_39Overlay(play->state.gfxCtx);
 
         if ((play->pauseCtx.state == 0) && (play->pauseCtx.debugState == 0)) {
@@ -6277,6 +6332,7 @@ void Interface_Draw(PlayState* play) {
 
             if (((gSaveContext.timerState != TIMER_STATE_OFF) && (gSaveContext.timerState != TIMER_STATE_STOP)) ||
                 (gSaveContext.subTimerState != SUBTIMER_STATE_OFF)) {
+                Interface_VrHudGroup(play, VR_HUD_EL_TIMER, 255); // SOH [VR] clock + countdown
                 timerDigits[0] = timerDigits[1] = svar2 = timerDigits[3] = 0;
                 timerDigits[2] = 10; // digit 10 is used as ':' (colon)
 
@@ -6371,6 +6427,8 @@ void Interface_Draw(PlayState* play) {
         }
     }
 
+    Interface_VrHudGroup(play, VR_HUD_EL_OTHER, 255); // SOH [VR] flag editor, full-screen fill
+
     if (pauseCtx->debugState == 3) {
         FlagSet_Update(play);
     }
@@ -6383,6 +6441,7 @@ void Interface_Draw(PlayState* play) {
     }
 
     CLOSE_DISPS(play->state.gfxCtx);
+    Interface_VrHudGroup(play, VR_HUD_EL_NONE, 0); // SOH [VR] end of the HUD's groups
 }
 
 void Interface_DrawTotalGameplayTimer(PlayState* play) {
@@ -6425,6 +6484,8 @@ void Interface_DrawTotalGameplayTimer(PlayState* play) {
         s32 rectWidth = 8;
         s32 rectHeightOri = 16;
         s32 rectHeight;
+
+        Interface_VrHudGroup(play, VR_HUD_EL_GAME_TIMER, 255); // SOH [VR]
 
         OPEN_DISPS(play->state.gfxCtx);
 
@@ -6489,6 +6550,7 @@ void Interface_DrawTotalGameplayTimer(PlayState* play) {
         free(totalTimeText);
 
         CLOSE_DISPS(play->state.gfxCtx);
+        Interface_VrHudGroup(play, VR_HUD_EL_NONE, 0); // SOH [VR]
     }
 }
 

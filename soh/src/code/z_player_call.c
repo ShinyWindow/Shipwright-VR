@@ -1,4 +1,5 @@
 #include "global.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -56,6 +57,13 @@ void PlayerCall_Update(Actor* thisx, PlayState* play) {
 }
 
 void PlayerCall_Draw(Actor* thisx, PlayState* play) {
-    KaleidoScopeCall_LoadPlayer();
+    // SOH [VR] The world-space pause menu draws the frozen world, Link included, while the pause
+    // menu holds the shared kaleido/player overlay slot. Claiming the slot here would evict the
+    // menu every frame (KaleidoScopeCall_Draw then refuses to draw it). In SoH the slot is only
+    // bookkeeping (Overlay_Load is a no-op, KaleidoManager_GetRamAddr returns its argument), so
+    // drawing Link without it is safe; the menu's close path reloads the player as always.
+    if (!VrPause_WorldSpace()) {
+        KaleidoScopeCall_LoadPlayer();
+    }
     sPlayerCallDrawFunc(thisx, play);
 }

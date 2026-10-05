@@ -1,4 +1,5 @@
 #include "z_kaleido_scope.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 #include "textures/icon_item_static/icon_item_static.h"
 #include "textures/parameter_static/parameter_static.h"
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
@@ -126,29 +127,34 @@ void KaleidoScope_DrawAButton(PlayState* play, Vtx* vtx, int16_t xTranslate, int
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
+// Where the pause camera frames Link (render space) and his model scale, per age / sword.
+static void KaleidoScope_PlayerWorkPose(Vec3f* pos, f32* scale) {
+    if (LINK_AGE_IN_YEARS == YEARS_CHILD) {
+        pos->x = 2.0f;
+        pos->y = -130.0f;
+        pos->z = -150.0f;
+        *scale = 0.046f;
+    } else if (CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD) != EQUIP_VALUE_SWORD_MASTER &&
+               !CVarGetInteger(CVAR_GENERAL("PauseMenuAnimatedLinkTriforce"), 0)) {
+        pos->x = 25.0f;
+        pos->y = -228.0f;
+        pos->z = 60.0f;
+        *scale = 0.056f;
+    } else {
+        pos->x = 20.0f;
+        pos->y = -180.0f;
+        pos->z = -40.0f;
+        *scale = 0.047f;
+    }
+}
+
 void KaleidoScope_DrawPlayerWork(PlayState* play) {
     PauseContext* pauseCtx = &play->pauseCtx;
     Vec3f pos;
     Vec3s rot;
     f32 scale;
 
-    if (LINK_AGE_IN_YEARS == YEARS_CHILD) {
-        pos.x = 2.0f;
-        pos.y = -130.0f;
-        pos.z = -150.0f;
-        scale = 0.046f;
-    } else if (CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD) != EQUIP_VALUE_SWORD_MASTER &&
-               !CVarGetInteger(CVAR_GENERAL("PauseMenuAnimatedLinkTriforce"), 0)) {
-        pos.x = 25.0f;
-        pos.y = -228.0f;
-        pos.z = 60.0f;
-        scale = 0.056f;
-    } else {
-        pos.x = 20.0f;
-        pos.y = -180.0f;
-        pos.z = -40.0f;
-        scale = 0.047f;
-    }
+    KaleidoScope_PlayerWorkPose(&pos, &scale);
 
     // SOH [Port] Draw the pause Link on a separate framebuffer starting in the work buffer
     OPEN_DISPS(play->state.gfxCtx);
@@ -164,6 +170,32 @@ void KaleidoScope_DrawPlayerWork(PlayState* play) {
 
     gsSPResetFB(WORK_DISP++);
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// SOH [VR] World-space pause menu: the real 3D Link stands on the page where the 64x112 image would be
+// (equipVtx 80..83, extended 80 down by KaleidoScope_DrawEquipmentImage: 112 tall from vertex 80's
+// top edge), framed exactly as the pause camera frames him (Player_DrawPauseInWorld). The current
+// matrix is the equipment page's. gVrPauseLinkScale sizes him about his feet; kVrPauseLinkStandOut
+// (page units, about his half-depth on the page's scale) stands him just in front of the page.
+static void KaleidoScope_DrawPlayerInWorld(PlayState* play) {
+    static const f32 kVrPauseLinkStandOut = 12.0f;
+    PauseContext* pauseCtx = &play->pauseCtx;
+    Vtx* image = &pauseCtx->equipVtx[80];
+    Vec3f pos;
+    Vec3s rot;
+    f32 scale;
+
+    KaleidoScope_PlayerWorkPose(&pos, &scale);
+    rot.y = 32300;
+    rot.x = rot.z = 0;
+    Player_DrawPauseInWorld(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime, &pos, &rot, scale,
+                            SWORD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD)),
+                            TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC)),
+                            SHIELD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD)),
+                            BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS)),
+                            (image[0].v.ob[0] + image[1].v.ob[0]) * 0.5f,
+                            image[0].v.ob[1] - (PAUSE_EQUIP_PLAYER_HEIGHT * 0.5f), PAUSE_EQUIP_PLAYER_HEIGHT,
+                            CVarGetFloat("gVrPauseLinkScale", 100.0f) / 100.0f, kVrPauseLinkStandOut);
 }
 
 void KaleidoScope_DrawEquipment(PlayState* play) {
@@ -855,7 +887,12 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
         KaleidoScope_DrawAButton(play, sStrengthAButtonVtx, translateX, translateY);
     }
 
-    KaleidoScope_DrawPlayerWork(play);
+    // SOH [VR] World-space pause: 3D Link on the page instead of the offscreen image.
+    if (VrPause_WorldSpace()) {
+        KaleidoScope_DrawPlayerInWorld(play);
+    } else {
+        KaleidoScope_DrawPlayerWork(play);
+    }
 
     // if ((pauseCtx->unk_1E4 == 7) && (sEquipTimer == 10)) {
     // KaleidoScope_SetupPlayerPreRender(play);
@@ -879,7 +916,10 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
     // gSPSegment(POLY_OPA_DISP++, 0x0C, pauseCtx->iconItemAltSegment);
 
     Gfx_SetupDL_42Opa(play->state.gfxCtx);
-    KaleidoScope_DrawEquipmentImage(play, pauseCtx->playerSegment, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT);
+    if (!VrPause_WorldSpace()) {
+        KaleidoScope_DrawEquipmentImage(play, pauseCtx->playerSegment, PAUSE_EQUIP_PLAYER_WIDTH,
+                                        PAUSE_EQUIP_PLAYER_HEIGHT);
+    }
 
     if (gUpgradeMasks[0]) {}
 

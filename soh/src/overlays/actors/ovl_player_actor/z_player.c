@@ -2058,6 +2058,8 @@ void Player_AnimReplaceNormalPlayLoopAdjusted(PlayState* play, Player* this, Lin
 // opposite sides of the same frame — steering could go target-relative on a tick where vanilla
 // never aimed the body at the target.
 static s32 sVrLockOnActive = 0;
+// SOH [VR] Set from the tall-ledge wind-up until Link lands: the head pin leaves his facing alone.
+static s32 sVrLedgeJump = false;
 
 static s32 Player_VrLockOnBody(Player* this, PlayState* play) {
     if (!CVarGetInteger("gVrLegaiaLockOn", 0) || !VR_IsInitialized() || !VR_GetFirstPerson()) {
@@ -3074,9 +3076,23 @@ s32 func_80834EB8(Player* this, PlayState* play) {
     return 0;
 }
 
+// SOH [VR] Selector mode: a HELD hookshot trigger is a standing request to ready the hook, not
+// only the one frame it went down. Vanilla readies on sUseHeldItem, a single-frame press, and only
+// if on that exact frame the hook is back in the hand (func_80834FBC), the upper body is running
+// the hookshot action, and Player_ProcessItemButtons' gates pass. A squeeze that lands on any
+// other frame (hook still flying or reeling back, mid-landing, next to a door) was lost, and
+// holding on did nothing until the trigger happened to cross its threshold again — the "hold for
+// seconds before it engages" bug. sHeldItemButtonIsHeldDown is the trigger mirror's held state,
+// rebuilt every frame by the same gates, so the hook readies on the first frame it CAN. Release
+// still fires (func_808351D4), so a hold never spans a shot.
+static s32 Player_VrHookshotHoldReady(Player* this) {
+    return VrItemSelect_ModeActive() && (this->actor.category == ACTORCAT_PLAYER) && Player_HoldsHookshot(this) &&
+           sHeldItemButtonIsHeldDown;
+}
+
 s32 func_80834F2C(Player* this, PlayState* play) {
     if ((this->doorType == PLAYER_DOORTYPE_NONE) && !(this->stateFlags1 & PLAYER_STATE1_BOOMERANG_THROWN)) {
-        if (sUseHeldItem || func_80834E44(play)) {
+        if (sUseHeldItem || Player_VrHookshotHoldReady(this) || func_80834E44(play)) {
             if (func_80834D2C(this, play)) {
                 return func_80834EB8(this, play);
             }
@@ -3235,8 +3251,10 @@ s32 func_808353D8(Player* this, PlayState* play) {
         return true;
     }
 
-    if (!func_80834758(play, this) &&
-        (sUseHeldItem || ((this->unk_860 < 0) && sHeldItemButtonIsHeldDown) || func_80834E44(play))) {
+    // SOH [VR] Player_VrHookshotHoldReady: after a shot (unk_860 >= 0) vanilla re-readies only on a
+    // fresh press; a trigger held while the hook reeled back stays a request until it is home.
+    if (!func_80834758(play, this) && (sUseHeldItem || Player_VrHookshotHoldReady(this) ||
+                                       ((this->unk_860 < 0) && sHeldItemButtonIsHeldDown) || func_80834E44(play))) {
         this->unk_860 = ABS(this->unk_860);
 
         if (func_8083442C(this, play)) {
@@ -3914,6 +3932,98 @@ void Player_VrReleaseItem(PlayState* play, Player* this, const float* velocity) 
     }
     Player_DetachHeldActor(play, this);
     Player_VrRestorePassiveSelection(this, action, item);
+}
+
+// SOH [VR] Physical carrying (VrCarry.cpp): the vanilla lift without its animation. Same gates as
+// Player_ActionHandler_2's carry accept (nothing carried, not underwater, a neutral ground action) and
+// func_8083A0F4's strength rule for bushes / bomb flowers; whatever is in Link's hands is put away
+// first (vanilla waits for the put-away animation; here the selector's instant empty-hands); then
+// exactly what Player_Action_80846050 does on its attach frame, and the carry upper action it ends
+// with. The object's own reaction (Actor_HasParent) is untouched. 1 lifted, 0 refused, -1 too heavy.
+int32_t Player_VrCarryPickUp(PlayState* play, Player* this, Actor* actor) {
+    if (actor == NULL || this->actor.category != ACTORCAT_PLAYER || actor->parent != NULL ||
+        this->heldActor != NULL || !Player_VrIsNeutralLocomotion(this) ||
+        (this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_CUTSCENE)) ||
+        (this->stateFlags2 & PLAYER_STATE2_UNDERWATER)) {
+        return 0;
+    }
+    if (GameInteractor_Should(VB_PREVENT_STRENGTH,
+                              ((actor->id == ACTOR_EN_BOMBF) || (actor->id == ACTOR_EN_KUSA)) &&
+                                  (Player_GetStrength() <= PLAYER_STR_NONE))) {
+        return -1;
+    }
+    if ((this->heldItemAction != PLAYER_IA_NONE) && (Player_VrSelectItem(play, this, -1) != 1)) {
+        return 0;
+    }
+    this->interactRangeActor = actor;
+    this->getItemId = GI_NONE;
+    this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
+    this->stateFlags1 |= PLAYER_STATE1_CARRYING_ACTOR;
+    this->heldActor = actor;
+    this->actor.child = actor;
+    actor->parent = &this->actor;
+    actor->bgCheckFlags &= 0xFF00;
+    this->unk_3BC.y = actor->shape.rot.y - this->actor.shape.rot.y;
+    func_80835688(this, play);
+    return 1;
+}
+
+// SOH [VR] Physical carrying, the silver boulder: the vanilla boulder lift without its animation. Same
+// gates as the light pick-up plus Player_ActionHandler_2's strength rule (Silver Gauntlets); then the
+// boulder action (Player_Action_80846260: Link rooted, A/B still throws it the vanilla way) straight in
+// its holding loop, and the attach of its frame 27. 1 lifted, 0 refused, -1 too heavy.
+int32_t Player_VrCarryPickUpHeavy(PlayState* play, Player* this, Actor* actor) {
+    if (actor == NULL || this->actor.category != ACTORCAT_PLAYER || actor->parent != NULL ||
+        this->heldActor != NULL || !Player_VrIsNeutralLocomotion(this) ||
+        (this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_CUTSCENE)) ||
+        (this->stateFlags2 & PLAYER_STATE2_UNDERWATER)) {
+        return 0;
+    }
+    if (Player_GetStrength() < PLAYER_STR_SILVER_G) {
+        return -1;
+    }
+    if ((this->heldItemAction != PLAYER_IA_NONE) && (Player_VrSelectItem(play, this, -1) != 1)) {
+        return 0;
+    }
+    this->interactRangeActor = actor;
+    this->getItemId = GI_NONE;
+    this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
+    this->stateFlags1 |= PLAYER_STATE1_CARRYING_ACTOR;
+    func_80832224(this);
+    Player_SetupAction(play, this, Player_Action_80846260, 0);
+    Player_AnimPlayLoop(play, this, &gPlayerAnim_link_silver_wait);
+    this->av2.actionVar2 = 1;
+    this->heldActor = actor;
+    this->actor.child = actor;
+    actor->parent = &this->actor;
+    return 1;
+}
+
+// SOH [VR] Physical carrying: the held object leaves with the hand's throw (units/tick; zero = a drop),
+// then vanilla's own post-throw (func_80834644: back to the held-item upper action, detach). Every
+// liftable rebuilds velocity.x/z from speedXZ + world.rot.y when it leaves the hand, and keeps
+// velocity.y — the same fields func_8084409C sets.
+void Player_VrCarryRelease(PlayState* play, Player* this, const float* velocity) {
+    Actor* held = this->heldActor;
+
+    if (held == NULL || held->parent != &this->actor || !(this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR)) {
+        return;
+    }
+    held->velocity.x = velocity[0];
+    held->velocity.y = velocity[1];
+    held->velocity.z = velocity[2];
+    held->speedXZ = sqrtf(SQ(velocity[0]) + SQ(velocity[2]));
+    held->world.rot.y = (held->speedXZ > 0.0f) ? Math_Atan2S(velocity[2], velocity[0]) : this->actor.shape.rot.y;
+    func_80834644(play, this);
+    if ((held->speedXZ + fabsf(velocity[1])) > 2.0f) {
+        Player_PlaySfx(this, NA_SE_PL_THROW);
+    }
+    // The boulder action has nothing left to hold: back on his feet (vanilla's throw action ends the
+    // same way, func_80839F90).
+    if (this->actionFunc == Player_Action_80846260) {
+        Player_PlayVoiceSfx(this, NA_SE_VO_LI_SWORD_N);
+        func_80839F90(this, play);
+    }
 }
 
 // SOH [VR] Physical boomerang throw (VrBoomerang.cpp). Vanilla commits the throw at frame 6 of
@@ -6155,6 +6265,9 @@ void func_8083A5C4(PlayState* play, Player* this, CollisionPoly* arg2, f32 arg3,
     Player_ResetAnimMovement(this);
 }
 
+// SOH [VR] Physical climbing (defined with the rest of it, before Player_ActionHandler_5).
+static s32 Player_VrClimbOffEdge(PlayState* play, Player* this, CollisionPoly* poly, s32 bgId, Vec3f* hit);
+
 s32 func_8083A6AC(Player* this, PlayState* play) {
     //! @bug `floorPitch` and `floorPitchAlt` are cleared to 0 before this function is called, because the player
     //! left the ground. The angles will always be zero and therefore will always pass these checks.
@@ -6190,6 +6303,11 @@ s32 func_8083A6AC(Player* this, PlayState* play) {
             s32 sp50;
 
             sp54 = Math3D_UDistPlaneToPos(nx, ny, nz, sp84->dist, &this->actor.world.pos);
+
+            // SOH [VR] Physical climbing: walking off onto a ladder / vines below = put on it.
+            if (Player_VrClimbOffEdge(play, this, sp84, sp80, &sp68)) {
+                return 1;
+            }
 
             sp50 = (sPrevFloorProperty == 6);
             if (!sp50 && (func_80041DB8(&play->colCtx, sp84, sp80) & 8)) {
@@ -6818,6 +6936,50 @@ void func_8083BCD0(Player* this, PlayState* play, s32 controlStickDirection) {
     Player_PlaySfx(this, ((controlStickDirection << 0xE) == 0x8000) ? NA_SE_PL_ROLL : NA_SE_PL_SKIP);
 }
 
+// SOH [VR] Dash in any direction: in VR direct movement, A with the stick pushed is a dash whether
+// or not Link is Z-targeting. The stick's quadrant (vanilla's own 4-way split, already relative to
+// the steering frame because the body is pinned to it) picks the move: forward = roll, left/right =
+// side hop, back = backflip. Link travels along the EXACT stick direction (sControlStickWorldYaw)
+// instead of facing + a 90 degree step. Hops lock this->yaw for the whole jump (the air action
+// skips steering while HOPPING); rolls steer with the stick in Player_Action_Roll. Vanilla speeds,
+// threshold (magnitude 55) and floor gates; the stick centred falls through to vanilla.
+static s32 Player_VrDashActive(Player* this) {
+    return Player_VrDirectMovement(this) && (this->actor.category == ACTORCAT_PLAYER) &&
+           CVarGetInteger("gVrDashAnyDirection", 1);
+}
+
+static s32 Player_VrTryDash(Player* this, PlayState* play) {
+    s32 controlStickDirection = this->controlStickDirections[this->controlStickDataIndex];
+
+    if ((controlStickDirection <= PLAYER_STICK_DIR_NONE) || (sFloorType == 7)) {
+        return false;
+    }
+
+    if (controlStickDirection == PLAYER_STICK_DIR_FORWARD) {
+        Player_SetupRoll(this, play);
+        this->yaw = sControlStickWorldYaw;
+        return true;
+    }
+
+    // Hops keep Player_ActionHandler_10's floor gates (rolls never had them).
+    if ((play->roomCtx.curRoom.behaviorType1 == ROOM_BEHAVIOR_TYPE1_2) ||
+        (SurfaceType_GetFloorEffect(&play->colCtx, this->actor.floorPoly, this->actor.floorBgId) == 1)) {
+        return false;
+    }
+
+    func_8083BCD0(this, play, controlStickDirection);
+    this->yaw = sControlStickWorldYaw;
+
+    if (controlStickDirection == 1 || controlStickDirection == 3) {
+        gSaveContext.ship.stats.count[COUNT_SIDEHOPS]++;
+    }
+    if (controlStickDirection == 2) {
+        gSaveContext.ship.stats.count[COUNT_BACKFLIPS]++;
+    }
+
+    return true;
+}
+
 s32 Player_ActionHandler_10(Player* this, PlayState* play) {
     s32 controlStickDirection;
 
@@ -6825,6 +6987,12 @@ s32 Player_ActionHandler_10(Player* this, PlayState* play) {
         (play->roomCtx.curRoom.behaviorType1 != ROOM_BEHAVIOR_TYPE1_2) && (sFloorType != 7) &&
         (SurfaceType_GetFloorEffect(&play->colCtx, this->actor.floorPoly, this->actor.floorBgId) != 1)) {
         controlStickDirection = this->controlStickDirections[this->controlStickDataIndex];
+
+        // SOH [VR] Dash in any direction: a pushed stick dashes along it (forward = roll, not the
+        // targeted jump slash). Centred stick keeps the vanilla targeted jump below.
+        if (Player_VrDashActive(this) && (controlStickDirection > PLAYER_STICK_DIR_NONE)) {
+            return Player_VrTryDash(this, play);
+        }
 
         if (controlStickDirection <= PLAYER_STICK_DIR_FORWARD) {
             if (Player_IsZTargeting(this)) {
@@ -6932,7 +7100,8 @@ void func_8083C148(Player* this, PlayState* play) {
 s32 Player_ActionHandler_Roll(Player* this, PlayState* play) {
     if (!Player_UpdateHostileLockOn(this) && !sUpperBodyIsBusy && !(this->stateFlags1 & PLAYER_STATE1_ON_HORSE) &&
         CHECK_BTN_ALL(sControlInput->press.button, BTN_A)) {
-        if (Player_TryRoll(this, play)) {
+        // SOH [VR] Dash in any direction: untargeted, any pushed stick dashes (not only forward).
+        if (Player_VrDashActive(this) ? Player_VrTryDash(this, play) : Player_TryRoll(this, play)) {
             return true;
         } else if ((this->putAwayCooldownTimer == 0) && (this->heldItemAction >= PLAYER_IA_SWORD_MASTER)) {
             Player_UseItem(play, this, ITEM_NONE);
@@ -8318,13 +8487,621 @@ void func_8083F72C(Player* this, LinkAnimationHeader* anim, PlayState* play) {
     this->actor.shape.rot.y = this->yaw = this->actor.wallYaw + 0x8000;
 }
 
+// #region SOH [VR] Physical climbing (VrClimb.cpp). The vanilla climb action (Player_Action_8084BF1C,
+// PLAYER_STATE1_CLIMBING_LADDER) stays the state machine; these put Link on the wall where a hand
+// took hold, move him by the hands instead of the stick's step animations, and resolve letting go
+// with vanilla's own transitions (climb over the top, ladder dismount, stepping off, dropping).
+// Ladders and vines behave the same: the climbable area's own edges are the only limit.
+void func_8083FB7C(Player* this, PlayState* play);
+void func_8084BEE4(Player* this);
+
+// Link's body distance from the held wall while the hands climb (units). The climb action's glue
+// (func_8083F360) holds him at ageProperties->unk_3C (15); here the arms set it. < 0 = not climbing
+// by hand.
+static f32 sVrClimbWallDist = -1.0f;
+
+// The held wall's horizontal unit normal (out of the wall, toward Link).
+static s32 Player_VrClimbWallNormal(Player* this, f32 n[3]) {
+    CollisionPoly* poly = this->actor.wallPoly;
+    f32 len;
+
+    if (poly == NULL) {
+        return false;
+    }
+    n[0] = COLPOLY_GET_NORMAL(poly->normal.x);
+    n[1] = 0.0f;
+    n[2] = COLPOLY_GET_NORMAL(poly->normal.z);
+    len = sqrtf(SQ(n[0]) + SQ(n[2]));
+    if (len < 0.001f) {
+        return false;
+    }
+    n[0] /= len;
+    n[2] /= len;
+    return true;
+}
+
+// Signed distance of a point from the held wall's plane (units, + in front of it).
+static f32 Player_VrClimbPlaneDist(Player* this, f32 x, f32 y, f32 z) {
+    CollisionPoly* poly = this->actor.wallPoly;
+
+    if (poly == NULL) {
+        return 0.0f;
+    }
+    return (COLPOLY_GET_NORMAL(poly->normal.x) * x) + (COLPOLY_GET_NORMAL(poly->normal.y) * y) +
+           (COLPOLY_GET_NORMAL(poly->normal.z) * z) + poly->dist;
+}
+
+static f32 Player_VrClimbBodyDist(Player* this) {
+    return (sVrClimbWallDist >= 0.0f) ? sVrClimbWallDist : this->ageProperties->unk_3C;
+}
+
+// Where vanilla climbs over the top: the climb action's own probe (D_8085488C: unk_40 up, 26 ahead of
+// a body 15 off the wall = 11 into it — measured from the wall here, wherever the arms hold the body)
+// finds the floor of the ledge above, and the last climb step that sees it leaves Link a whole number
+// of 15-unit rungs below it (adult 60, child 45): fireY.
+static f32 Player_VrClimbTopY(PlayState* play, Player* this, f32* fireY) {
+    Vec3f probeOffset;
+    Vec3f probePos;
+    f32 topY;
+
+    probeOffset.x = 0.0f;
+    probeOffset.y = this->ageProperties->unk_40;
+    probeOffset.z = Player_VrClimbBodyDist(this) + (26.0f - this->ageProperties->unk_3C);
+    topY = func_8083973C(play, this, &probeOffset, &probePos);
+    *fireY = topY - 15.0f * (s32)(this->ageProperties->unk_40 / 15.0f);
+    return topY;
+}
+
+// The climb action's wall glue (func_8083F360) at a chosen distance, and its "still on something
+// climbable" test (func_8083FBC0 without the A button). The glue re-targets the wall and moves Link
+// even onto a wall that turns out not to be climbable, so a miss puts everything back as it was.
+static s32 Player_VrClimbGlue(PlayState* play, Player* this, f32 dist) {
+    Vec3f pos = this->actor.world.pos;
+    CollisionPoly* wallPoly = this->actor.wallPoly;
+    s32 wallBgId = this->actor.wallBgId;
+    s16 wallYaw = this->actor.wallYaw;
+    s16 shapeYaw = this->actor.shape.rot.y;
+    s16 yaw = this->yaw;
+    u32 wallFlags = sTouchedWallFlags;
+
+    if (func_8083F360(play, this, 26.0f, dist, dist + 35.0f, -20.0f) &&
+        ((sTouchedWallFlags & 8) || (sTouchedWallFlags & 2) ||
+         func_80041E4C(&play->colCtx, this->actor.wallPoly, this->actor.wallBgId))) {
+        return true;
+    }
+    this->actor.world.pos = pos;
+    this->actor.wallPoly = wallPoly;
+    this->actor.wallBgId = wallBgId;
+    this->actor.wallYaw = wallYaw;
+    this->actor.shape.rot.y = shapeYaw;
+    this->yaw = yaw;
+    sTouchedWallFlags = wallFlags;
+    return false;
+}
+
+static f32 Player_VrClimbUnitsPerCm(void) {
+    f32 ws = VR_GetWorldScale();
+
+    return ((ws < 1.0f) ? 35.0f : ws) * 0.01f;
+}
+
+// On the wall, holding still: frozen on the LAST frame of a climb step (where every vanilla step and
+// the top dismount start from), root motion on (0x9F: the physics branch is skipped, as vanilla).
+static void Player_VrClimbHoldPose(PlayState* play, Player* this) {
+    LinkAnimationHeader* anim;
+    f32 lastFrame;
+
+    func_80832224(this);
+    Math_Vec3f_Copy(&this->actor.prevPos, &this->actor.world.pos);
+    anim = this->ageProperties->unk_AC[this->av1.actionVar1];
+    lastFrame = Animation_GetLastFrame(anim);
+    LinkAnimation_Change(play, &this->skelAnime, anim, 0.0f, lastFrame, lastFrame, ANIMMODE_ONCE, 0.0f);
+    Player_StartAnimMovement(play, this, 0x9F);
+    // The animation's root at that frame is where the root motion starts from (vanilla's unk_62:
+    // the root at the end of each climb step). Without it the first root-motion step moved Link by
+    // the climb pose's root minus the standing one (~27 units up) and the next step back again: a
+    // one-tick jump of the whole view at the grab.
+    this->skelAnime.prevTransl = this->ageProperties->unk_62[this->av1.actionVar1];
+    this->skelAnime.prevRot = this->actor.shape.rot.y;
+    this->actor.velocity.y = 0.0f;
+    this->fallStartHeight = this->actor.world.pos.y;
+}
+
+// Take hold: what func_8083EC18 does when the stick walks Link into a climbable wall, without the
+// mount animation and without moving him: the hand's polygon becomes the wall, Link squares up to it
+// where he stands (only if his centre line would miss the climbable part — a hand on a ladder off
+// to one side — does he slide along the wall under the hand, the view kept still through the
+// roomscale origin). The climb starts frozen on the LAST frame of a climb step (where every vanilla
+// step and the top dismount start from) once the held item is put away.
+static void Player_VrClimbMount(PlayState* play, Player* this, VrClimbHit* hit) {
+    CollisionPoly* poly = (CollisionPoly*)hit->poly;
+    s32 wallFlags = func_80041DB8(&play->colCtx, poly, hit->bgId);
+    f32 n[3];
+    s16 oldYaw = this->actor.shape.rot.y;
+    f32 headFwd = CVarGetFloat("gVrHeadOffsetForward", 6.0f);
+    f32 headSide = CVarGetFloat("gVrHeadOffsetSide", 0.0f);
+
+    this->actor.wallPoly = poly;
+    this->actor.wallBgId = hit->bgId;
+    this->actor.wallYaw = Math_Atan2S(poly->normal.z, poly->normal.x);
+    this->actor.bgCheckFlags |= BGCHECKFLAG_PLAYER_WALL_INTERACT;
+    sTouchedWallFlags = wallFlags;
+
+    Player_SetupWaitForPutAway(play, this, func_8083A3B0);
+    this->stateFlags1 |= PLAYER_STATE1_CLIMBING_LADDER;
+    this->stateFlags1 &= ~PLAYER_STATE1_IN_WATER;
+    this->av1.actionVar1 = (wallFlags & 8) ? 2 : 0;
+    this->av2.actionVar2 = 0;
+    this->actor.shape.rot.y = this->yaw = this->actor.wallYaw + 0x8000;
+    // Link squaring up to the wall swings the first-person head offset (z_play.c: forward/side along
+    // his facing); the roomscale origin takes the difference so the view doesn't move.
+    if (VR_GetFirstPerson()) {
+        s16 newYaw = this->actor.shape.rot.y;
+        VR_AddRoomscaleDisplacement(
+            ((Math_SinS(newYaw) * headFwd) - (Math_CosS(newYaw) * headSide)) -
+                ((Math_SinS(oldYaw) * headFwd) - (Math_CosS(oldYaw) * headSide)),
+            ((Math_CosS(newYaw) * headFwd) + (Math_SinS(newYaw) * headSide)) -
+                ((Math_CosS(oldYaw) * headFwd) + (Math_SinS(oldYaw) * headSide)));
+    }
+
+    sVrClimbWallDist = MAX(Player_VrClimbPlaneDist(this, this->actor.world.pos.x, this->actor.world.pos.y,
+                                                   this->actor.world.pos.z),
+                           7.0f);
+    if (!Player_VrClimbGlue(play, this, sVrClimbWallDist) && Player_VrClimbWallNormal(this, n)) {
+        Vec3f from = this->actor.world.pos;
+        f32 lateral = ((hit->pos[0] - this->actor.world.pos.x) * -n[2]) + ((hit->pos[2] - this->actor.world.pos.z) * n[0]);
+
+        this->actor.wallPoly = poly;
+        this->actor.wallBgId = hit->bgId;
+        this->actor.world.pos.x += -n[2] * lateral;
+        this->actor.world.pos.z += n[0] * lateral;
+        Player_VrClimbGlue(play, this, sVrClimbWallDist);
+        VR_AddRoomscaleDisplacement(this->actor.world.pos.x - from.x, this->actor.world.pos.z - from.z);
+    }
+
+    Player_VrClimbHoldPose(play, this);
+    func_8084BEE4(this);
+}
+
+static s32 Player_VrClimbTryMount(PlayState* play, Player* this) {
+    VrClimbHit hit;
+
+    if (!VrClimb_TakeMount(play, this, &hit)) {
+        return false;
+    }
+    Player_VrClimbMount(play, this, &hit);
+    return true;
+}
+
+// Getting onto a ladder or vines from above, with no climb-down animation: Link is put straight onto
+// the climbable face where vanilla's climb-down ends — at vanilla's distance from it (the glue finds
+// the face), facing it, a whole number of 15-unit rungs below the floor he came from (the rung the
+// climb back up dismounts from) — holding still until the hands take over, and the player is
+// turned to face it. hit = a point on the polygon that sent him here; out = the horizontal
+// direction from the climbable face toward the climber's side; gap = how far behind that polygon the
+// face itself sits (the ladder-top strip stands just in front of the ladder).
+static void Player_VrClimbPlaceFromAbove(PlayState* play, Player* this, CollisionPoly* poly, s32 bgId,
+                                         const Vec3f* hit, f32 outX, f32 outZ, f32 gap, f32 floorY) {
+    s32 wallFlags = func_80041DB8(&play->colCtx, poly, bgId);
+
+    this->actor.world.pos.x = hit->x + outX * (this->ageProperties->unk_3C + gap);
+    this->actor.world.pos.z = hit->z + outZ * (this->ageProperties->unk_3C + gap);
+    this->actor.world.pos.y = floorY - 15.0f * (s32)(this->ageProperties->unk_40 / 15.0f);
+
+    Player_SetupWaitForPutAway(play, this, func_8083A3B0);
+    this->stateFlags1 |= PLAYER_STATE1_CLIMBING_LADDER;
+    this->stateFlags1 &= ~(PLAYER_STATE1_IN_WATER | PLAYER_STATE1_HANGING_OFF_LEDGE);
+    this->av1.actionVar1 = (wallFlags & 8) ? 2 : 0;
+    this->av2.actionVar2 = 0;
+    this->actor.wallPoly = poly;
+    this->actor.wallBgId = bgId;
+    this->actor.wallYaw = Math_Atan2S(outZ, outX);
+    this->actor.shape.rot.y = this->yaw = this->actor.wallYaw + 0x8000;
+    sVrClimbWallDist = this->ageProperties->unk_3C;
+    // The climbable face behind the polygon becomes the held wall (for the strip: the ladder).
+    if (!Player_VrClimbGlue(play, this, sVrClimbWallDist)) {
+        this->actor.wallPoly = poly;
+        this->actor.wallBgId = bgId;
+    }
+    if (this->av1.actionVar1 == 0) {
+        this->av1.actionVar1 = (sTouchedWallFlags & 8) ? 2 : 0;
+    }
+    Player_VrClimbHoldPose(play, this);
+    func_8084BEE4(this);
+    VR_RequestFaceYaw(this->actor.shape.rot.y);
+    VrClimb_NoteResolved(this, 3);
+}
+
+// Walking (stick) toward the top of a ladder. Every ladder's top has a thin "ladder top" strip
+// (wall flags 0x04 alone) standing at the edge of the floor above it, facing that floor; vanilla
+// starts down when the interact line (one line at +18 from Link's centre along his facing) touches
+// it and he is within 8 units of its middle (func_8083EC18's 0x04 branch). That is a 20-unit target
+// along a facing that follows the head. Here: short level lines along the way Link is MOVING, at
+// three heights near the feet, out to just past his wall radius; any of them on a strip = start down.
+static s32 Player_VrClimbLadderTop(PlayState* play, Player* this) {
+    static const f32 sHeights[] = { 4.0f, 10.0f, 16.0f };
+    f32 dirX;
+    f32 dirZ;
+    f32 reach;
+    s32 i;
+
+    if (!VrClimb_Active(this) || !(this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) || (this->actor.speedXZ < 0.3f)) {
+        return false;
+    }
+    if ((this->stateFlags1 & PLAYER_STATE1_IN_WATER) && (this->currentBoots != PLAYER_BOOTS_IRON) &&
+        !(this->actor.yDistToWater < this->ageProperties->unk_2C)) {
+        return false;
+    }
+    dirX = Math_SinS(this->actor.world.rot.y);
+    dirZ = Math_CosS(this->actor.world.rot.y);
+    reach = this->ageProperties->wallCheckRadius + 14.0f;
+    for (i = 0; i < ARRAY_COUNT(sHeights); i++) {
+        Vec3f from;
+        Vec3f to;
+        Vec3f hit;
+        CollisionPoly* poly;
+        s32 bgId;
+        s32 flags;
+        f32 nx;
+        f32 nz;
+        f32 len;
+
+        from = this->actor.world.pos;
+        from.y += sHeights[i];
+        to.x = from.x + dirX * reach;
+        to.y = from.y;
+        to.z = from.z + dirZ * reach;
+        if (!BgCheck_EntityLineTest1(&play->colCtx, &from, &to, &hit, &poly, true, false, false, true, &bgId)) {
+            continue;
+        }
+        if (ABS(poly->normal.y) >= 600) {
+            continue;
+        }
+        flags = func_80041DB8(&play->colCtx, poly, bgId);
+        if (!(flags & 4) || (flags & (2 | 8))) {
+            continue;
+        }
+        nx = COLPOLY_GET_NORMAL(poly->normal.x);
+        nz = COLPOLY_GET_NORMAL(poly->normal.z);
+        len = sqrtf(SQ(nx) + SQ(nz));
+        if (len < 0.001f) {
+            continue;
+        }
+        // The strip faces the floor: the ladder and its climber are on the far side of it.
+        Player_VrClimbPlaceFromAbove(play, this, poly, bgId, &hit, -nx / len, -nz / len, 4.0f,
+                                     this->actor.world.pos.y);
+        return true;
+    }
+    return false;
+}
+
+// Walking off an edge onto a climbable face below it (func_8083A6AC found it: the line from where
+// Link is now back toward where he stood hit the face, which faces him). Vanilla hangs him from the
+// ledge (ladders) or plays the vine catch; with physical climbing he is put on it like the above.
+static s32 Player_VrClimbOffEdge(PlayState* play, Player* this, CollisionPoly* poly, s32 bgId, Vec3f* hit) {
+    s32 flags;
+    f32 nx;
+    f32 nz;
+    f32 len;
+
+    if (!VrClimb_Active(this) || (this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR)) {
+        return false;
+    }
+    flags = func_80041DB8(&play->colCtx, poly, bgId);
+    if (!(flags & (2 | 4 | 8))) {
+        return false;
+    }
+    nx = COLPOLY_GET_NORMAL(poly->normal.x);
+    nz = COLPOLY_GET_NORMAL(poly->normal.z);
+    len = sqrtf(SQ(nx) + SQ(nz));
+    if (len < 0.001f) {
+        return false;
+    }
+    Player_VrClimbPlaceFromAbove(play, this, poly, bgId, hit, nx / len, nz / len, 0.0f, this->fallStartHeight);
+    return true;
+}
+
+// The last hand let go. Anywhere at or above where vanilla climbs over — or within the window below
+// it — vanilla's own climb over (the hang-and-pull-up onto the ledge: climb-cliff sound, Link's voice);
+// a ladder let go right at its rung plays the ladder dismount instead. At the floor: stepping off.
+// Anywhere else: vanilla's letting go, carrying a capped share of the body's last motion.
+static void Player_VrClimbRelease(PlayState* play, Player* this) {
+    f32 fireY;
+    f32 topY = Player_VrClimbTopY(play, this, &fireY);
+    f32 vel[3];
+    f32 n[3];
+    f32 hx;
+    f32 hz;
+
+    if ((this->actor.wallPoly != NULL) && (this->actor.world.pos.y < topY) &&
+        (this->actor.world.pos.y >= (fireY - VrClimb_TopWindowUnits()))) {
+        // Back to vanilla's distance from the wall: its climb-over and dismount start from there.
+        if (Player_VrClimbWallNormal(this, n)) {
+            f32 shift = this->ageProperties->unk_3C - Player_VrClimbPlaneDist(this, this->actor.world.pos.x,
+                                                                              this->actor.world.pos.y,
+                                                                              this->actor.world.pos.z);
+            this->actor.world.pos.x += n[0] * shift;
+            this->actor.world.pos.z += n[2] * shift;
+        }
+        if ((this->av1.actionVar1 == 0) && (this->actor.world.pos.y <= (fireY + 5.0f))) {
+            this->actor.world.pos.y = fireY;
+            Player_SetupDismountLadder(this, this->ageProperties->unk_CC[this->av2.actionVar2 & 1], play);
+        } else {
+            this->actor.world.pos.y = topY;
+            this->stateFlags1 &= ~PLAYER_STATE1_CLIMBING_LADDER;
+            func_8083A5C4(play, this, this->actor.wallPoly, this->ageProperties->unk_3C,
+                          &gPlayerAnim_link_normal_jump_climb_up_free);
+            this->yaw += 0x8000;
+            this->actor.shape.rot.y = this->yaw;
+            func_8083A9B8(this, &gPlayerAnim_link_normal_jump_climb_up_free, play);
+            this->stateFlags1 |= PLAYER_STATE1_CLIMBING_LEDGE;
+        }
+        sVrClimbWallDist = -1.0f;
+        VrClimb_NoteResolved(this, 1);
+        return;
+    }
+
+    func_8083FB7C(this, play);
+    sVrClimbWallDist = -1.0f;
+    if ((this->actor.world.pos.y - this->actor.floorHeight) < 15.0f) {
+        VrClimb_NoteResolved(this, 2);
+        return;
+    }
+    Player_PlayVoiceSfx(this, NA_SE_VO_LI_AUTO_JUMP);
+    VrClimb_Launch(this, vel);
+    this->actor.velocity.y = vel[1];
+    // A little away from the wall (vanilla's -0.4 back-off) plus the motion along it.
+    hx = vel[0];
+    hz = vel[2];
+    if (Player_VrClimbWallNormal(this, n)) {
+        hx += n[0] * 0.4f;
+        hz += n[2] * 0.4f;
+    }
+    this->linearVelocity = sqrtf(SQ(hx) + SQ(hz));
+    if (this->linearVelocity > 0.01f) {
+        this->yaw = Math_Atan2S(hz, hx);
+    }
+    this->actor.speedXZ = this->linearVelocity;
+    this->actor.world.rot.y = this->yaw;
+    // This tick's physics already ran (skipped while climbing): take the fall's first step now, so the
+    // drop moves on from this tick instead of hanging still for one.
+    this->actor.velocity.y += this->actor.gravity;
+    this->actor.world.pos.x += Math_SinS(this->yaw) * this->linearVelocity;
+    this->actor.world.pos.z += Math_CosS(this->yaw) * this->linearVelocity;
+    this->actor.world.pos.y += this->actor.velocity.y;
+    Actor_UpdateBgCheckInfo(play, &this->actor, 26.0f, 6.0f, this->ageProperties->ceilingCheckHeight, 7);
+    VrClimb_NoteResolved(this, 0);
+}
+
+// Could Link's body be at p on this wall right now? The checks a move there would face next tick:
+// the glue's climbable line (at +26, along his facing, out to the held distance), the floor under
+// him, and the ceiling over him.
+static s32 Player_VrClimbCanBeAt(PlayState* play, Player* this, Vec3f* p) {
+    f32 fx = Math_SinS(this->actor.shape.rot.y);
+    f32 fz = Math_CosS(this->actor.shape.rot.y);
+    f32 dist = Player_VrClimbBodyDist(this);
+    Vec3f a;
+    Vec3f b;
+    Vec3f res;
+    CollisionPoly* poly;
+    s32 bgId;
+    f32 ceilY;
+
+    if (p->y < this->actor.floorHeight) {
+        return false;
+    }
+    a.x = p->x - fx * 20.0f;
+    a.y = p->y + 26.0f;
+    a.z = p->z - fz * 20.0f;
+    b.x = p->x + fx * (dist + 35.0f);
+    b.y = a.y;
+    b.z = p->z + fz * (dist + 35.0f);
+    if (!BgCheck_EntityLineTest1(&play->colCtx, &a, &b, &res, &poly, true, false, false, true, &bgId)) {
+        return false;
+    }
+    {
+        u32 flags = func_80041DB8(&play->colCtx, poly, bgId);
+        if (!((flags & 8) || (flags & 2) || func_80041E4C(&play->colCtx, poly, bgId))) {
+            return false;
+        }
+    }
+    return !BgCheck_EntityCheckCeiling(&play->colCtx, &ceilY, p, this->ageProperties->ceilingCheckHeight, &poly,
+                                       &bgId, &this->actor);
+}
+
+// How far the body can go from where it is along dir (unit), up to max units (bisected to ~1/8).
+static f32 Player_VrClimbRoom(PlayState* play, Player* this, f32 dx, f32 dy, f32 dz, f32 max) {
+    f32 lo = 0.0f;
+    f32 hi = max;
+    Vec3f p;
+    s32 i;
+
+    p.x = this->actor.world.pos.x + dx * max;
+    p.y = this->actor.world.pos.y + dy * max;
+    p.z = this->actor.world.pos.z + dz * max;
+    if (Player_VrClimbCanBeAt(play, this, &p)) {
+        return max;
+    }
+    for (i = 0; i < 3; i++) {
+        f32 mid = (lo + hi) * 0.5f;
+        p.x = this->actor.world.pos.x + dx * mid;
+        p.y = this->actor.world.pos.y + dy * mid;
+        p.z = this->actor.world.pos.z + dz * mid;
+        if (Player_VrClimbCanBeAt(play, this, &p)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// Tell the VR layer how far the view may run ahead of the body before the next tick: the room left
+// up / down / along the wall (the climbable area's edges, floor, ceiling) and toward the wall (the
+// view's 10 cm minimum). It follows the gripping hand at headset rate only that far, so pulling
+// against a limit holds still instead of overshooting and snapping back every tick.
+static void Player_VrClimbPublishLimits(PlayState* play, Player* this, const f32 n[3], f32 eyeDist, f32 minEye) {
+    static const f32 kRoom = 12.0f; // more than a hand moves in one tick
+    f32 tx = -n[2];
+    f32 tz = n[0];
+    f32 lo[3];
+    f32 hi[3];
+
+    lo[0] = Player_VrClimbRoom(play, this, -tx, 0.0f, -tz, kRoom);
+    hi[0] = Player_VrClimbRoom(play, this, tx, 0.0f, tz, kRoom);
+    lo[1] = Player_VrClimbRoom(play, this, 0.0f, -1.0f, 0.0f, kRoom);
+    hi[1] = Player_VrClimbRoom(play, this, 0.0f, 1.0f, 0.0f, kRoom);
+    lo[2] = MAX(eyeDist - minEye, 0.0f);
+    hi[2] = 1000.0f;
+    VR_SetClimbViewLimits(n, lo, hi);
+}
+
+// Inside the climb action, before the stick is read. False = no hand holds: the vanilla climb runs.
+static s32 Player_VrClimbDrive(PlayState* play, Player* this) {
+    f32 n[3];
+    f32 move[3];
+    f32 inPlane[3];
+    f32 achieved[3];
+    f32 eye[3];
+    f32 fwd[3];
+    f32 up[3];
+    f32 along;
+    f32 newDist;
+    f32 eyeDist;
+    f32 minEye;
+    s32 st;
+    s32 ix;
+    s32 iy;
+    s32 ok;
+    s32 i;
+    Vec3f base;
+
+    if (!Player_VrClimbWallNormal(this, n)) {
+        return false;
+    }
+    st = VrClimb_Step(play, this, move);
+    if (st == 0) {
+        sVrClimbWallDist = -1.0f;
+        return false;
+    }
+    // Hold the climb pose where it is (frozen, re-loaded every tick as the vanilla climb does):
+    // root motion reads the pose's root each tick, and a pose left un-updated falls back to its base
+    // root — which root motion turns into a jump of the whole body.
+    this->skelAnime.playSpeed = 0.0f;
+    LinkAnimation_Update(play, &this->skelAnime);
+    if (sVrClimbWallDist < 0.0f) {
+        sVrClimbWallDist = MAX(Player_VrClimbPlaneDist(this, this->actor.world.pos.x, this->actor.world.pos.y,
+                                                       this->actor.world.pos.z),
+                               7.0f);
+    }
+
+    // Along the wall vs toward / away from it.
+    along = (move[0] * n[0]) + (move[2] * n[2]);
+    inPlane[0] = move[0] - (n[0] * along);
+    inPlane[1] = move[1];
+    inPlane[2] = move[2] - (n[2] * along);
+
+    // The randomizer's climb shuffle (and the Climb Everything cheat) see the hands as the stick.
+    iy = (inPlane[1] > 0.0f) ? 100 : ((inPlane[1] < 0.0f) ? -100 : 0);
+    ix = ((SQ(inPlane[0]) + SQ(inPlane[2])) > 0.0001f) ? 100 : 0;
+    if (!GameInteractor_Should(VB_CLIMB, true, &ix, &iy) && (st == 1)) {
+        return true;
+    }
+    if ((inPlane[1] > 0.0f) && (iy <= 0)) {
+        inPlane[1] = 0.0f;
+    }
+    if (ix == 0) {
+        inPlane[0] = inPlane[2] = 0.0f;
+    }
+
+    // Toward / away from the wall is the glue's distance: out as far as the arms take you; in until
+    // the view is ~10 cm from the wall. The view already shows this tick's pull (it follows the
+    // gripping hand), so a view too close — from the arms or from leaning in — pushes the body back.
+    newDist = sVrClimbWallDist + along;
+    VR_GetCameraPose(eye, fwd, up);
+    eyeDist = Player_VrClimbPlaneDist(this, eye[0], eye[1], eye[2]);
+    minEye = 10.0f * Player_VrClimbUnitsPerCm();
+    if (eyeDist < minEye) {
+        newDist += minEye - eyeDist;
+    }
+    newDist = CLAMP(newDist, 7.0f, 400.0f);
+
+    this->actor.velocity.y = 0.0f;
+    this->linearVelocity = 0.0f;
+
+    // A moving wall carries Link first (the climb action's own dynapoly follow).
+    if ((this->actor.wallPoly != NULL) && (this->actor.wallBgId != BGCHECK_SCENE)) {
+        DynaPolyActor* wallPolyActor = DynaPoly_GetActor(&play->colCtx, this->actor.wallBgId);
+        if (wallPolyActor != NULL) {
+            Vec3f carry;
+            Math_Vec3f_Diff(&wallPolyActor->actor.world.pos, &wallPolyActor->actor.prevPos, &carry);
+            Math_Vec3f_Sum(&this->actor.world.pos, &carry, &this->actor.world.pos);
+        }
+    }
+    base = this->actor.world.pos;
+
+    // The whole move; else only its vertical part, else only its sideways part (sliding along the
+    // edge of the climbable area instead of sticking to it); else just the distance from the wall.
+    ok = false;
+    for (i = 0; (i < 4) && !ok; i++) {
+        this->actor.world.pos.x = base.x + (((i == 0) || (i == 2)) ? inPlane[0] : 0.0f);
+        this->actor.world.pos.y = base.y + ((i <= 1) ? inPlane[1] : 0.0f);
+        this->actor.world.pos.z = base.z + (((i == 0) || (i == 2)) ? inPlane[2] : 0.0f);
+        Actor_UpdateBgCheckInfo(play, &this->actor, 26.0f, 6.0f, this->ageProperties->ceilingCheckHeight, 7);
+        if (this->actor.world.pos.y < this->actor.floorHeight) {
+            this->actor.world.pos.y = this->actor.floorHeight;
+        }
+        ok = Player_VrClimbGlue(play, this, newDist);
+    }
+    if (!ok) {
+        this->actor.world.pos = base;
+        Actor_UpdateBgCheckInfo(play, &this->actor, 26.0f, 6.0f, this->ageProperties->ceilingCheckHeight, 7);
+        ok = Player_VrClimbGlue(play, this, sVrClimbWallDist);
+        newDist = sVrClimbWallDist;
+    }
+    if (!ok) {
+        // The wall itself left (a moving one): vanilla lets go.
+        func_8083FB7C(this, play);
+        sVrClimbWallDist = -1.0f;
+        VrClimb_NoteResolved(this, 0);
+        return true;
+    }
+    sVrClimbWallDist = newDist;
+    if (st == 1) {
+        Player_VrClimbPublishLimits(play, this, n, MAX(eyeDist, minEye), minEye);
+    }
+
+    achieved[0] = this->actor.world.pos.x - base.x;
+    achieved[1] = this->actor.world.pos.y - base.y;
+    achieved[2] = this->actor.world.pos.z - base.z;
+    if (VrClimb_Moved(this, achieved, newDist)) {
+        func_8084BEE4(this);
+    }
+    if (st == 2) {
+        Player_VrClimbRelease(play, this);
+    }
+    return true;
+}
+// #endregion
+
 s32 Player_ActionHandler_5(Player* this, PlayState* play) {
     DynaPolyActor* wallPolyActor;
+
+    // SOH [VR] Physical climbing: a hand took hold of a climbable surface (VrClimb), or Link walks
+    // into the top of a ladder (put onto it).
+    if (Player_VrClimbTryMount(play, this) ||
+        (!(this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) && Player_VrClimbLadderTop(play, this))) {
+        return 1;
+    }
 
     if (!(this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) &&
         (this->actor.bgCheckFlags & BGCHECKFLAG_PLAYER_WALL_INTERACT) && (sShapeYawToTouchedWall < 0x3000)) {
 
-        if (((this->linearVelocity > 0.0f) && func_8083EC18(this, play, sTouchedWallFlags)) ||
+        // SOH [VR] With physical climbing, walking into a ladder/vine doesn't climb it by itself
+        // (gVrClimbWalkIn): you take hold with your hands.
+        if (((this->linearVelocity > 0.0f) &&
+             !((sTouchedWallFlags & (2 | 8)) && VrClimb_BlockWalkInMount(this)) &&
+             func_8083EC18(this, play, sTouchedWallFlags)) ||
             Player_TryEnteringCrawlspace(this, play, sTouchedWallFlags)) {
             return 1;
         }
@@ -8336,7 +9113,9 @@ s32 Player_ActionHandler_5(Player* this, PlayState* play) {
 
             this->stateFlags2 |= PLAYER_STATE2_DO_ACTION_GRAB;
 
-            if (CHECK_BTN_ALL(sControlInput->cur.button, BTN_A)) {
+            // SOH [VR] Physical block pushing: both hands on the face + both grips squeezed there
+            // is the A button of the grab (VrBlock never offers it for Bg_Heavy_Block).
+            if (CHECK_BTN_ALL(sControlInput->cur.button, BTN_A) || VrBlock_GrabHeld(this)) {
 
                 if ((this->actor.wallBgId != BGCHECK_SCENE) &&
                     ((wallPolyActor = DynaPoly_GetActor(&play->colCtx, this->actor.wallBgId)) != NULL)) {
@@ -8373,8 +9152,10 @@ s32 Player_ActionHandler_5(Player* this, PlayState* play) {
 }
 
 s32 func_8083F9D0(PlayState* play, Player* this) {
+    // SOH [VR] Physical block pushing: grips closed on the block hold on exactly like A held.
     if ((this->actor.bgCheckFlags & BGCHECKFLAG_PLAYER_WALL_INTERACT) &&
-        ((this->stateFlags2 & PLAYER_STATE2_MOVING_DYNAPOLY) || CHECK_BTN_ALL(sControlInput->cur.button, BTN_A))) {
+        ((this->stateFlags2 & PLAYER_STATE2_MOVING_DYNAPOLY) || CHECK_BTN_ALL(sControlInput->cur.button, BTN_A) ||
+         VrBlock_GrabHeld(this))) {
         DynaPolyActor* wallPolyActor = NULL;
 
         if (this->actor.wallBgId != BGCHECK_SCENE) {
@@ -8394,6 +9175,40 @@ s32 func_8083F9D0(PlayState* play, Player* this) {
     Player_AnimPlayOnce(play, this, &gPlayerAnim_link_normal_push_wait_end);
     this->stateFlags2 &= ~PLAYER_STATE2_MOVING_DYNAPOLY;
     return 1;
+}
+
+// SOH [VR] Physical block pushing (VrBlock.cpp): which part of the vanilla grab Link is in — 0 none,
+// 1 putting the held item away first (func_8083F72C -> func_8083A388), 2 hold, 3 push, 4 pull.
+int32_t Player_VrBlockAction(Player* this) {
+    if (this->actionFunc == Player_Action_8084B78C) {
+        return 2;
+    }
+    if (this->actionFunc == Player_Action_8084B898) {
+        return 3;
+    }
+    if (this->actionFunc == Player_Action_8084B9E4) {
+        return 4;
+    }
+    if (this->actionFunc == Player_Action_WaitForPutAway && this->afterPutAwayFunc == func_8083A388) {
+        return 1;
+    }
+    return 0;
+}
+
+// SOH [VR] Physical block pushing: the wall half of Player_ActionHandler_5's "Grab" prompt — Link is
+// touching a pushable (WALL_FLAG 0x40) face this tick.
+// SOH [VR] Physical heavy lifting: Link is lifting a gauntlet pillar — its put-away (func_8083A0F4 on a
+// Bg_Heavy_Block) or the lift action itself. The hands then follow his animation (z_player_lib.c), so the
+// pillar rides his animated hand and its frame-229 throw (pitch-driven speed) is exactly the base game's.
+int32_t Player_VrPillarLift(Player* this) {
+    return (this->actionFunc == Player_Action_80846120) ||
+           ((this->actionFunc == Player_Action_WaitForPutAway) && (this->afterPutAwayFunc == func_8083A0F4) &&
+            (this->interactRangeActor != NULL) && (this->interactRangeActor->id == ACTOR_BG_HEAVY_BLOCK));
+}
+
+int32_t Player_VrTouchingPushable(Player* this) {
+    return (this->actor.bgCheckFlags & BGCHECKFLAG_PLAYER_WALL_INTERACT) && (this->actor.wallPoly != NULL) &&
+           (sTouchedWallFlags & 0x40);
 }
 
 void func_8083FAB8(Player* this, PlayState* play) {
@@ -8889,6 +9704,20 @@ void Player_Action_Idle(Player* this, PlayState* play) {
             }
 
             Player_GetMovementSpeedAndYaw(this, &speedTarget, &yawTarget, SPEED_MODE_CURVED, play);
+
+            // SOH [VR] Direct movement moves Link at ANY deflection (linear speed), but the curved speed
+            // that starts the walk is zero below a third of the stick: a light push then moved him while
+            // he stayed "standing", and Idle's action list never checks for ledge climbs. Whatever moves
+            // him starts the walk.
+            if ((speedTarget == 0.0f) && Player_VrDirectMovement(this)) {
+                f32 vrLinearSpeed;
+                s16 vrLinearYaw;
+                Player_GetMovementSpeedAndYaw(this, &vrLinearSpeed, &vrLinearYaw, SPEED_MODE_LINEAR, play);
+                if (vrLinearSpeed != 0.0f) {
+                    speedTarget = vrLinearSpeed;
+                    yawTarget = vrLinearYaw;
+                }
+            }
 
             if (speedTarget != 0.0f) {
                 func_8083C8DC(this, play, yawTarget);
@@ -10203,6 +11032,11 @@ void Player_Action_8084411C(Player* this, PlayState* play) {
 
         Player_UpdateUpperBody(this, play);
 
+        // SOH [VR] Physical climbing: taking hold of a climbable surface in mid-air.
+        if (Player_VrClimbTryMount(play, this)) {
+            return;
+        }
+
         if (((this->stateFlags2 & PLAYER_STATE2_HOPPING) && (this->av1.actionVar1 == 2)) ||
             !func_8083BBA0(this, play)) {
             if (this->actor.velocity.y < 0.0f) {
@@ -10231,7 +11065,10 @@ void Player_Action_8084411C(Player* this, PlayState* play) {
                         (this->linearVelocity > 0.0f)) {
                         if ((this->yDistToLedge >= 150.0f) &&
                             (this->controlStickDirections[this->controlStickDataIndex] == 0)) {
-                            func_8083EC18(this, play, sTouchedWallFlags);
+                            // SOH [VR] Not when the hands just let go of this climb on purpose.
+                            if (!VrClimb_SuppressVanillaGrab(this)) {
+                                func_8083EC18(this, play, sTouchedWallFlags);
+                            }
                         } else if ((this->ledgeClimbType >= 2) && (this->yDistToLedge < 150.0f) &&
                                    (((this->actor.world.pos.y - this->actor.floorHeight) + this->yDistToLedge) >
                                     (70.0f * this->ageProperties->unk_08))) {
@@ -10376,18 +11213,31 @@ void Player_Action_Roll(Player* this, PlayState* play) {
                     return;
                 }
 
-                Player_GetMovementSpeedAndYaw(this, &speedTarget, &yawTarget, SPEED_MODE_CURVED, play);
+                s32 vrStickHeld =
+                    Player_GetMovementSpeedAndYaw(this, &speedTarget, &yawTarget, SPEED_MODE_CURVED, play);
 
                 // `speedTarget` at this point is the speed that would be used for regular walking.
                 // Rolling speed is 1.5 times faster than walking speed would be for the current control stick input.
                 speedTarget *= 1.5f;
 
-                if ((speedTarget < 3.0f) || (this->controlStickDirections[this->controlStickDataIndex] != 0)) {
-                    speedTarget = 3.0f;
-                }
+                // SOH [VR] Dash in any direction: the roll travels and steers along the STICK, not the
+                // body (which is pinned to the head, so vanilla rolls followed the gaze). The stick
+                // is along the roll by construction, so vanilla's "stick not forward = minimum
+                // speed" test is dropped; stick released = keep the current heading.
+                if (Player_VrDashActive(this)) {
+                    if (speedTarget < 3.0f) {
+                        speedTarget = 3.0f;
+                    }
+                    func_8083DF68(this, speedTarget, vrStickHeld ? yawTarget : this->yaw);
+                } else {
+                    if ((speedTarget < 3.0f) ||
+                        (this->controlStickDirections[this->controlStickDataIndex] != 0)) {
+                        speedTarget = 3.0f;
+                    }
 
-                GameInteractor_Should(VB_PLAYER_ROLL_STEER, false, this, play, yawTarget);
-                func_8083DF68(this, speedTarget, this->actor.shape.rot.y);
+                    GameInteractor_Should(VB_PLAYER_ROLL_STEER, false, this, play, yawTarget);
+                    func_8083DF68(this, speedTarget, this->actor.shape.rot.y);
+                }
 
                 if (func_8084269C(play, this)) {
                     Actor_PlaySfx_Flagged2(&this->actor, NA_SE_PL_ROLL_DUST - SFX_FLAG);
@@ -10965,6 +11815,12 @@ static AnimSfxEntry D_8085461C[] = {
 };
 
 void Player_Action_80846120(Player* this, PlayState* play) {
+    // SOH [VR] Physical heavy lifting: a pillar lifted by hand stays overhead, one frame short of the
+    // throw (frame 229), for as long as both grips stay closed; letting go lets the animation reach the
+    // vanilla throw. Released earlier, it simply plays on.
+    if (VrBlock_PillarHold(this) && (this->skelAnime.curFrame > 227.0f) && (this->skelAnime.curFrame < 229.0f)) {
+        this->skelAnime.curFrame = 227.0f;
+    }
     if (LinkAnimation_Update(play, &this->skelAnime) && (this->av2.actionVar2++ > 20)) {
         if (!Player_ActionHandler_13(this, play)) {
             func_8083A098(this, &gPlayerAnim_link_normal_heavy_carry_end, play);
@@ -11820,6 +12676,18 @@ void Player_ProcessSceneCollision(PlayState* play, Player* this) {
         s32 wallBgId;
         s16 yawDiff;
         s32 pad;
+        // SOH [VR] Direct movement pins Link's facing to the HEAD; vanilla's facing follows the way he
+        // moves. The wall / ledge checks below (the facing line, the 0x3000 yaw window, the ledge probe)
+        // read his facing, so looking along a wall or pushing the stick diagonally into a ledge failed.
+        // For these checks only, his facing is his movement direction (this->yaw: the stick's direction,
+        // or the head when the stick is neutral), as in the base game; restored right after.
+        s16 vrSavedShapeYaw = this->actor.shape.rot.y;
+        s32 vrMoveFacing = Player_VrDirectMovement(this) && !sVrLockOnActive &&
+                           (this->actor.category == ACTORCAT_PLAYER) &&
+                           !(this->stateFlags2 & (PLAYER_STATE2_CRAWLING | PLAYER_STATE2_GRABBING_DYNAPOLY));
+        if (vrMoveFacing) {
+            this->actor.shape.rot.y = this->yaw;
+        }
 
         sInteractWallCheckOffset.y = 18.0f;
         sInteractWallCheckOffset.z = this->ageProperties->wallCheckRadius + 10.0f;
@@ -11923,6 +12791,9 @@ void Player_ProcessSceneCollision(PlayState* play, Player* this) {
                     }
                 }
             }
+        }
+        if (vrMoveFacing) {
+            this->actor.shape.rot.y = vrSavedShapeYaw;
         }
     } else {
         this->unk_880 = R_RUN_SPEED_LIMIT / 100.0f;
@@ -12529,12 +13400,41 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
                    PLAYER_STATE1_FREEFALL)) &&
                 // Hands on a block: the body is anchored to it — physical walking is dropped
                 // instead of dragging Link off the grab.
-                !(this->stateFlags2 & (PLAYER_STATE2_DIVING | PLAYER_STATE2_GRABBING_DYNAPOLY))) {
+                // Crawlspaces: vanilla crawling is a rail — the hole entry snaps Link onto the
+                // tunnel axis, root motion carries him in, and only stick Y moves him along it; the
+                // exit fires when his radius-10 crawl collider touches the exit wall. A body move
+                // here shoves him off that rail, and it is swept with the STANDING collider (radius
+                // 14 at height 26), which in a tunnel catches the walls around and above the hole
+                // that the crawl collider (radius 10 at height 15) never touches.
+                !(this->stateFlags2 &
+                  (PLAYER_STATE2_DIVING | PLAYER_STATE2_GRABBING_DYNAPOLY | PLAYER_STATE2_CRAWLING)) &&
+                // Holding a boulder / lifting a pillar: Link is rooted, as in the base game.
+                (this->actionFunc != Player_Action_80846260) && !Player_VrPillarLift(this)) {
                 float rsDesired[2];
                 VR_GetRoomscaleDesired(rsDesired);
                 float rsScale = CVarGetFloat("gVrRoomscaleScale", 1.0f);
                 float rsDx = rsDesired[0] * rsScale;
                 float rsDz = rsDesired[1] * rsScale;
+                // SOH [VR] Touching a wall (last tick's collision): the part of the body move that points
+                // INTO it is dropped. The sweep would only resolve it straight back out, leaving Link at
+                // exactly his radius from the face just before the game's own wall check, which then
+                // counts the contact by a float coin-flip; every miss reset the ledge-climb timer. Contact
+                // stays the game's; the view keeps the lean through the small body collider.
+                if ((this->actor.bgCheckFlags & BGCHECKFLAG_WALL) && (this->actor.wallPoly != NULL)) {
+                    f32 rsNx = COLPOLY_GET_NORMAL(this->actor.wallPoly->normal.x);
+                    f32 rsNz = COLPOLY_GET_NORMAL(this->actor.wallPoly->normal.z);
+                    f32 rsNl = sqrtf(SQ(rsNx) + SQ(rsNz));
+                    if (rsNl > 0.5f) {
+                        f32 rsOut;
+                        rsNx /= rsNl;
+                        rsNz /= rsNl;
+                        rsOut = (rsDx * rsNx) + (rsDz * rsNz);
+                        if (rsOut < 0.0f) {
+                            rsDx -= rsOut * rsNx;
+                            rsDz -= rsOut * rsNz;
+                        }
+                    }
+                }
                 float rsMag = sqrtf((rsDx * rsDx) + (rsDz * rsDz));
                 // Small deadzone: ignore sub-unit HMD jitter so Link's body doesn't micro-jitter (the
                 // camera still tracks head jitter; only the body is held still below the threshold).
@@ -12559,6 +13459,10 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
                     BgCheck_EntitySphVsWall3(&play->colCtx, &rsResult, &rsTo, &rsFrom,
                                              this->ageProperties->wallCheckRadius, &rsPoly, &rsBgId, &this->actor,
                                              26.0f);
+                    // SOH [VR] Small body collider: also stop at pots / rocks / bushes / crates (their
+                    // push is object collision, not walls), so leaning over one never carries the body
+                    // into it, or into a grotto hole hidden under a rock.
+                    VrBody_ClampBodyMove(play, this, &rsFrom.x, &rsResult.x);
                     this->actor.world.pos.x = rsResult.x;
                     this->actor.world.pos.z = rsResult.z;
                     // Advance the baked-in origin by what the body ACTUALLY moved (collision-limited).
@@ -12567,7 +13471,17 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
             }
             // #endregion
 
+            // SOH [VR] Small body collider (VrBody): what the walls push back out of the stick's
+            // movement moves the view instead (inside Link's own circle). While the view still has
+            // room toward the wall, the vanilla facing-a-wall speed cap is lifted so the view keeps
+            // walking speed; once it arrives, the cap is back and Link stops as in vanilla.
+            VrBody_BeginCollision(this);
             Player_ProcessSceneCollision(play, this);
+            // ...but never at a ledge Link can climb: there the vanilla cap keeps him on the face while
+            // the climb timer runs (full speed slid him along narrow faces before it finished).
+            if (VrBody_EndCollision(play, this) && (this->ledgeClimbType == 0) && (this->yDistToLedge == 0.0f)) {
+                this->unk_880 = R_RUN_SPEED_LIMIT / 100.0f;
+            }
         } else {
             if (GameInteractor_Should(VB_SET_STATIC_FLOOR_TYPE, true, this)) {
                 sFloorType = 0;
@@ -12704,6 +13618,15 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
         sUseHeldItem = sHeldItemButtonIsHeldDown = 0;
         sSavedCurrentMask = this->currentMask;
 
+        // SOH [VR] Physical block pushing: grips, hand reach and push pressure, sampled before the
+        // action reads them (the grab handler, the hold gate and the push/pull intent).
+        VrBlock_Tick(play, this);
+        // SOH [VR] Physical carrying: grab / join / hand-over / throw (VrCarry.cpp), same boundary.
+        VrCarry_Tick(play, this);
+        // SOH [VR] Physical climbing: grips and hand probes, before the grab handler / the air
+        // action (taking hold) and the climb action (moving the body) read them.
+        VrClimb_Tick(play, this);
+
         if (GameInteractor_Should(VB_EXECUTE_PLAYER_ACTION_FUNC, !(this->stateFlags3 & PLAYER_STATE3_PAUSE_ACTION_FUNC),
                                   this, input)) {
             this->actionFunc(this, play);
@@ -12730,7 +13653,17 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
         // body belongs to the TARGET (Player_UpdateShapeYaw just aimed it there), not to the head.
         sVrLockOnActive = Player_VrLockOnBody(this, play);
 
+        // SOH [VR] The tall-ledge climb (Player_Action_80845668: the wind-up, then the jump and mid-air
+        // ledge grab it launches) squares Link to the wall; the head pin must not undo that until he is
+        // back on his feet or hanging.
+        if (this->actionFunc == Player_Action_80845668) {
+            sVrLedgeJump = true;
+        } else if (!(this->stateFlags1 & PLAYER_STATE1_JUMPING)) {
+            sVrLedgeJump = false;
+        }
+
         if (Player_VrDirectMovement(this) && !Player_InBlockingCsMode(play, this) && !sVrLockOnActive &&
+            !sVrLedgeJump &&
             !(this->stateFlags1 & (PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_CLIMBING_LADDER |
                                    PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_HANGING_OFF_LEDGE)) &&
             !(this->stateFlags2 & (PLAYER_STATE2_CRAWLING | PLAYER_STATE2_GRABBING_DYNAPOLY))) {
@@ -13630,7 +14563,8 @@ void Player_Action_8084B78C(Player* this, PlayState* play) {
     if (LinkAnimation_Update(play, &this->skelAnime)) {
         if (!func_8083F9D0(play, this)) {
             Player_GetMovementSpeedAndYaw(this, &sp34, &sp32, SPEED_MODE_LINEAR, play);
-            temp = func_8083FFB8(this, &sp34, &sp32);
+            // SOH [VR] Physical block pushing: hand pressure is a second stick (the stick wins).
+            temp = VrBlock_Intent(this, func_8083FFB8(this, &sp34, &sp32));
             if (temp > 0) {
                 func_8083FAB8(this, play);
             } else if (temp < 0) {
@@ -13676,7 +14610,7 @@ void Player_Action_8084B898(Player* this, PlayState* play) {
 
     if (!func_8083F9D0(play, this)) {
         Player_GetMovementSpeedAndYaw(this, &sp34, &sp32, SPEED_MODE_LINEAR, play);
-        temp = func_8083FFB8(this, &sp34, &sp32);
+        temp = VrBlock_Intent(this, func_8083FFB8(this, &sp34, &sp32)); // SOH [VR] hand pressure
         if (temp < 0) {
             func_8083FB14(this, play);
         } else if (temp == 0) {
@@ -13731,7 +14665,7 @@ void Player_Action_8084B9E4(Player* this, PlayState* play) {
 
     if (!func_8083F9D0(play, this)) {
         Player_GetMovementSpeedAndYaw(this, &sp70, &sp6E, SPEED_MODE_LINEAR, play);
-        temp1 = func_8083FFB8(this, &sp70, &sp6E);
+        temp1 = VrBlock_Intent(this, func_8083FFB8(this, &sp70, &sp6E)); // SOH [VR] hand pressure
         if (temp1 > 0) {
             func_8083FAB8(this, play);
         } else if (temp1 == 0) {
@@ -13852,6 +14786,18 @@ void Player_Action_8084BF1C(Player* this, PlayState* play) {
 
     this->fallStartHeight = this->actor.world.pos.y;
     this->stateFlags2 |= PLAYER_STATE2_DISABLE_ROTATION_ALWAYS;
+
+    // SOH [VR] Physical climbing: while a hand holds, the hands move Link instead of the stick's
+    // step animations (not during vanilla's own mount animation, actionVar2 < 0).
+    if ((this->av2.actionVar2 >= 0) && Player_VrClimbDrive(play, this)) {
+        return;
+    }
+    // With physical climbing the stick doesn't climb: Link holds where he is until a hand takes hold
+    // (A still lets go).
+    if (VrClimb_Active(this)) {
+        sp84 = 0;
+        sp80 = 0;
+    }
 
     if (!GameInteractor_Should(VB_CLIMB, true, &sp80, &sp84)) {
         return;

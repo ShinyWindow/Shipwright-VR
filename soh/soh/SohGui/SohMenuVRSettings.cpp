@@ -7,6 +7,12 @@
 #include <cstdlib>
 #include <vr_interface.h>
 #include <fast/vr_openxr.h>
+#include <fast/vr_hud_settings.h>
+#include <algorithm>
+#include <cstring>
+#include <string>
+#include <ship/Context.h>
+#include <ship/window/gui/Gui.h>
 #include "soh/Enhancements/vr-combat/VrCombat.h"
 
 namespace SohGui {
@@ -35,6 +41,21 @@ static const std::map<int32_t, const char*> vrHudAttachOptions = {
     { 1, "Left Hand" },
     { 2, "Right Hand" },
 };
+
+static const std::map<int32_t, const char*> vrHudLayoutOptions = {
+    { 0, "Wrist Panels" },
+    { 1, "Classic (one panel)" },
+};
+
+static bool VrHudWristLayout() {
+    return CVarGetInteger("gVrHudLayout", 0) == 0;
+}
+static bool VrHudClassicHead() {
+    return !VrHudWristLayout() && CVarGetInteger("gVrHudAttach", 0) == 0;
+}
+static bool VrHudClassicHand() {
+    return !VrHudWristLayout() && CVarGetInteger("gVrHudAttach", 0) != 0;
+}
 
 static const std::map<int32_t, const char*> vrItemSelHandOptions = {
     { 0, "Sword Hand" },
@@ -416,6 +437,254 @@ static void VrPhysCombatReadout(WidgetInfo& info) {
     ImGui::TextUnformatted("Swing a controller and watch the numbers move.");
 }
 
+// ---------------------------------------------------------------- Wrist HUD editor
+// Every wrist HUD setting (fast/vr_hud_settings.h: names + defaults shared with the renderer),
+// per Adult / Child profile. Values save as they change; Ctrl+click a slider to type a value past
+// its range. "Copy All Settings" puts every value of both profiles on the clipboard, ready to send
+// as the new defaults.
+
+struct VrHudPanelField {
+    const char* field;
+    const char* label;
+    float min, max;
+    const char* fmt;
+    float VrHudPanelDefaults::*member;
+    const char* tooltip;
+};
+
+static const VrHudPanelField kVrHudPanelFields[] = {
+    { "X", "Sideways", -60.0f, 60.0f, "%.1f cm", &VrHudPanelDefaults::x, "Along the controller's right axis." },
+    { "Y", "Up", -60.0f, 60.0f, "%.1f cm", &VrHudPanelDefaults::y, "Along the controller's up axis." },
+    { "Z", "Forward / Back", -60.0f, 60.0f, "%.1f cm", &VrHudPanelDefaults::z,
+      "Negative = toward the controller's front (the way it points)." },
+    { "Pitch", "Tilt", -180.0f, 180.0f, "%.0f deg", &VrHudPanelDefaults::pitch,
+      "Tips the panel toward / away from your eyes." },
+    { "Yaw", "Turn", -180.0f, 180.0f, "%.0f deg", &VrHudPanelDefaults::yaw, "Turns the panel left / right." },
+    { "Roll", "Roll", -180.0f, 180.0f, "%.0f deg", &VrHudPanelDefaults::roll, "Spins the panel about its face." },
+    { "Scale", "Size", 10.0f, 1000.0f, "%.0f%%", &VrHudPanelDefaults::scale,
+      "Real size of the whole panel. 100% = a heart about 8 mm across." },
+    { "Width", "Card Width", 0.0f, 320.0f, "%.0f", &VrHudPanelDefaults::width,
+      "Width of the dark card in HUD units (a heart is ~10). 0 = fit the elements." },
+    { "Height", "Card Height", 0.0f, 480.0f, "%.0f", &VrHudPanelDefaults::height,
+      "Height of the dark card in HUD units. 0 = fit the elements." },
+    { "Padding", "Card Padding", 0.0f, 60.0f, "%.0f", &VrHudPanelDefaults::padding,
+      "Space between the card edge and the elements (HUD units)." },
+    { "Backing", "Card Opacity", 0.0f, 100.0f, "%.0f%%", &VrHudPanelDefaults::backing,
+      "Opacity of the dark card behind the panel." },
+};
+
+struct VrHudElementField {
+    const char* field;
+    const char* label;
+    float min, max;
+    const char* fmt;
+};
+
+static const VrHudElementField kVrHudElementFields[] = {
+    { "X", "Move Left / Right", -320.0f, 320.0f, "%.0f" },
+    { "Y", "Move Up / Down", -480.0f, 480.0f, "%.0f" },
+    { "Scale", "Size", 10.0f, 500.0f, "%.0f%%" },
+};
+
+static float VrHudElementDefault(const VrHudElementDesc& d, int child, const char* field) {
+    if (strcmp(field, "X") == 0) {
+        return d.x[child];
+    }
+    if (strcmp(field, "Y") == 0) {
+        return d.y[child];
+    }
+    return d.scale[child];
+}
+
+static void VrHudSaveSoon() {
+    Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+}
+
+static void VrHudSliderRow(const char* label, const char* cvar, float def, float mn, float mx, const char* fmt,
+                           const char* tooltip) {
+    ImGui::PushID(cvar);
+    float v = CVarGetFloat(cvar, def);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+    if (ImGui::SliderFloat(label, &v, mn, mx, fmt)) {
+        CVarSetFloat(cvar, v);
+        VrHudSaveSoon();
+    }
+    if (tooltip != nullptr && ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s\n(Ctrl+click to type any value.)", tooltip);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reset")) {
+        CVarClear(cvar);
+        VrHudSaveSoon();
+    }
+    ImGui::PopID();
+}
+
+// Copy or reset a whole profile. from < 0 = reset `to` to the defaults.
+static void VrHudProfileCopy(int from, int to) {
+    char src[96], dst[96];
+    for (int hand = 0; hand < 2; hand++) {
+        for (const auto& f : kVrHudPanelFields) {
+            VrHudPanelCVar(dst, sizeof(dst), to, hand, f.field);
+            if (from < 0) {
+                CVarClear(dst);
+            } else {
+                VrHudPanelCVar(src, sizeof(src), from, hand, f.field);
+                CVarSetFloat(dst, CVarGetFloat(src, kVrHudPanelDefaults[from][hand].*(f.member)));
+            }
+        }
+    }
+    for (int i = 0; i < kVrHudElementCount; i++) {
+        const VrHudElementDesc& d = kVrHudElements[i];
+        for (const auto& f : kVrHudElementFields) {
+            VrHudElementCVar(dst, sizeof(dst), to, d.key, f.field);
+            if (from < 0) {
+                CVarClear(dst);
+            } else {
+                VrHudElementCVar(src, sizeof(src), from, d.key, f.field);
+                CVarSetFloat(dst, CVarGetFloat(src, VrHudElementDefault(d, from, f.field)));
+            }
+        }
+        VrHudElementCVar(dst, sizeof(dst), to, d.key, "Show");
+        if (from < 0) {
+            CVarClear(dst);
+        } else {
+            VrHudElementCVar(src, sizeof(src), from, d.key, "Show");
+            CVarSetInteger(dst, CVarGetInteger(src, d.show[from]));
+        }
+    }
+    VrHudSaveSoon();
+}
+
+static std::string VrHudExportText() {
+    std::string out = "Shipwright-VR wrist HUD settings\n";
+    char name[96], line[160];
+    for (int child = 0; child < 2; child++) {
+        for (int hand = 0; hand < 2; hand++) {
+            for (const auto& f : kVrHudPanelFields) {
+                VrHudPanelCVar(name, sizeof(name), child, hand, f.field);
+                snprintf(line, sizeof(line), "%s=%.2f\n", name,
+                         CVarGetFloat(name, kVrHudPanelDefaults[child][hand].*(f.member)));
+                out += line;
+            }
+        }
+        for (int i = 0; i < kVrHudElementCount; i++) {
+            const VrHudElementDesc& d = kVrHudElements[i];
+            for (const auto& f : kVrHudElementFields) {
+                VrHudElementCVar(name, sizeof(name), child, d.key, f.field);
+                snprintf(line, sizeof(line), "%s=%.2f\n", name, CVarGetFloat(name, VrHudElementDefault(d, child, f.field)));
+                out += line;
+            }
+            VrHudElementCVar(name, sizeof(name), child, d.key, "Show");
+            snprintf(line, sizeof(line), "%s=%d\n", name, CVarGetInteger(name, d.show[child]));
+            out += line;
+        }
+    }
+    return out;
+}
+
+static void VrHudProfileEditor(int child) {
+    char name[96];
+    if (ImGui::Button(child ? "Copy Adult settings into Child" : "Copy Child settings into Adult")) {
+        VrHudProfileCopy(child ? 0 : 1, child);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset this profile to defaults")) {
+        VrHudProfileCopy(-1, child);
+    }
+
+    for (int hand = 0; hand < 2; hand++) {
+        ImGui::PushID(hand);
+        if (ImGui::CollapsingHeader(hand ? "Right Hand Panel (buttons + minimap)" : "Left Hand Panel (vitals)",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (const auto& f : kVrHudPanelFields) {
+                VrHudPanelCVar(name, sizeof(name), child, hand, f.field);
+                VrHudSliderRow(f.label, name, kVrHudPanelDefaults[child][hand].*(f.member), f.min, f.max, f.fmt, f.tooltip);
+            }
+        }
+        if (ImGui::CollapsingHeader(hand ? "Right Hand Elements" : "Left Hand Elements")) {
+            ImGui::TextWrapped("Each element starts in its automatic spot on the panel; these move and size "
+                               "it from there (HUD units: a heart is ~10).");
+            for (int i = 0; i < kVrHudElementCount; i++) {
+                const VrHudElementDesc& d = kVrHudElements[i];
+                if (d.hand != hand) {
+                    continue;
+                }
+                ImGui::PushID(d.key);
+                if (ImGui::TreeNode(d.label)) {
+                    VrHudElementCVar(name, sizeof(name), child, d.key, "Show");
+                    bool show = CVarGetInteger(name, d.show[child]) != 0;
+                    if (ImGui::Checkbox("Show", &show)) {
+                        CVarSetInteger(name, show ? 1 : 0);
+                        VrHudSaveSoon();
+                    }
+                    for (const auto& f : kVrHudElementFields) {
+                        VrHudElementCVar(name, sizeof(name), child, d.key, f.field);
+                        VrHudSliderRow(f.label, name, VrHudElementDefault(d, child, f.field), f.min, f.max, f.fmt, nullptr);
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::PopID();
+    }
+}
+
+static void VrWristHudEditor(WidgetInfo& info) {
+    const bool child_now = vr_get_hud_child();
+    ImGui::TextWrapped("Wrist HUD layout. Link's current age uses the %s profile. Edit either profile below; "
+                       "use Preview to see the other one without changing age.",
+                       child_now ? "Child" : "Adult");
+    if (CVarGetInteger("gVrHudLayout", 0) != 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                           "HUD & Menus -> HUD Layout is set to Classic: these settings apply to Wrist Panels.");
+    }
+
+    static const char* kPreview[] = { "Auto (Link's age)", "Adult", "Child" };
+    int preview = std::clamp(CVarGetInteger("gVrHud.Preview", 0), 0, 2);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+    if (ImGui::Combo("Preview Profile", &preview, kPreview, 3)) {
+        CVarSetInteger("gVrHud.Preview", preview);
+        VrHudSaveSoon();
+    }
+
+    bool grabEdit = CVarGetInteger("gVrHud.GrabEdit", 1) != 0;
+    if (ImGui::Checkbox("Edit by grabbing (in the headset)", &grabEdit)) {
+        CVarSetInteger("gVrHud.GrabEdit", grabEdit ? 1 : 0);
+        VrHudSaveSoon();
+    }
+    ImGui::TextWrapped("Bring one hand to the other wrist's panel (it tints blue when in reach), then:\n"
+                       "  A / X + grip: grab the whole panel. It sticks to your hand; move and turn it, "
+                       "let go of grip to drop it there.\n"
+                       "  B / Y + grip: grab the HUD element nearest your hand and slide it across the panel.\n"
+                       "Edits go into the profile in use (Link's age, or Preview). The sliders below follow "
+                       "along, so Copy All Settings afterwards to send them.");
+
+    if (ImGui::Button("Copy All Settings to Clipboard")) {
+        ImGui::SetClipboardText(VrHudExportText().c_str());
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Both profiles, every value. Paste it to Claude to make them the defaults.");
+    }
+
+    if (ImGui::BeginTabBar("VrWristHudProfiles")) {
+        static bool sFirst = true;
+        const ImGuiTabItemFlags adultFlags = (sFirst && !child_now) ? ImGuiTabItemFlags_SetSelected : 0;
+        const ImGuiTabItemFlags childFlags = (sFirst && child_now) ? ImGuiTabItemFlags_SetSelected : 0;
+        sFirst = false;
+        if (ImGui::BeginTabItem("Adult Link", nullptr, adultFlags)) {
+            VrHudProfileEditor(0);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Child Link", nullptr, childFlags)) {
+            VrHudProfileEditor(1);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+}
+
 // Physics flight recorder. The checkbox arms a ring buffer holding the most recent ~20 s of sim
 // steps; switching it off writes the capture to CSV next to the executable. Recording keeps the
 // LAST window rather than the first, so the workflow is: enable, go reproduce the problem, then
@@ -672,6 +941,99 @@ static void VrHammerReadout(WidgetInfo& info) {
     ImGui::Text("Pounds from %.1f m/s into a floor", d.poundSpeed);
 }
 
+// Live state of physical block pushing: whether Link touches a pushable face, each hand's distance
+// to it and its grip latch, then (attached) the push pressure against the threshold, the intent it
+// gives, and the block's motion. The in-headset answer to "it won't grab" and "it won't move".
+static void VrBlockReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    static const char* sGate[] = {
+        "ARMED",
+        "off (Physical Block Pushing unchecked)",
+        "not VR first person / motion hands off",
+        "cutscene / horse / water / transition",
+    };
+    static const char* sAction[] = { "not grabbing", "putting the item away", "HOLDING", "PUSHING", "PULLING" };
+    VrBlockDebug d;
+    VrBlock_GetDebug(&d);
+    const int gate = (d.gate >= 0 && d.gate < 4) ? d.gate : 2;
+    const int action = (d.action >= 0 && d.action < 5) ? d.action : 0;
+    ImGui::Text("Block: %s%s   (%s)", sAction[action], (action != 0 && !d.handGrab) ? " (A button)" : "",
+                sGate[gate]);
+    if (gate != 0) {
+        return;
+    }
+    if (action == 0) {
+        ImGui::Text("Touching a pushable face: %s", d.pushable ? "YES" : "no");
+        if (d.pushable) {
+            for (int h = 0; h < 2; h++) {
+                if (d.planeCm[h] <= -900.0f) {
+                    ImGui::Text("%s hand: untracked", h == 0 ? "Left" : "Right");
+                } else {
+                    ImGui::Text("%s hand: %+.0f cm from the face (on it within %.0f)%s%s", h == 0 ? "Left" : "Right",
+                                d.planeCm[h], d.reachCm, d.atWall[h] ? "   ON THE FACE" : "",
+                                d.latched[h] ? "   GRIPPED" : "");
+                }
+            }
+        }
+    } else if (d.handGrab) {
+        ImGui::Text("Pressure: %+.1f cm (push / pull past %.0f) -> %s", d.pressureCm, d.pushCm,
+                    d.intent > 0 ? "PUSH" : (d.intent < 0 ? "PULL" : "hold"));
+        ImGui::Text("Hands drifted %.0f cm (lets go past %.0f)", d.driftCm, d.pullOffCm);
+        ImGui::Text("Block %s   steps this grab: %d", d.blockMoving ? "SLIDING" : "still", d.steps);
+    }
+    ImGui::Text("Last let go: %s", d.lastRelease < 0    ? "none yet"
+                                   : d.lastRelease == 0 ? "grip opened"
+                                   : d.lastRelease == 1 ? "hand pulled away"
+                                                        : "Link left the grab (fall, hit, cutscene)");
+}
+
+// Physical climbing (VrClimb): which hand is on a climbable surface and holding, what drives the
+// body, and how the last climb ended. The in-headset answer to "it won't grab" / "it won't let me up".
+static void VrClimbReadout(WidgetInfo& info) {
+    if (!VR_IsInitialized()) {
+        ImGui::TextUnformatted("Not in VR.");
+        return;
+    }
+    static const char* sGate[] = {
+        "ARMED",
+        "off (Physical Climbing unchecked)",
+        "not VR first person / motion hands off",
+        "cutscene / horse / transition",
+    };
+    VrClimbDebug d;
+    VrClimb_GetDebug(&d);
+    const int gate = (d.gate >= 0 && d.gate < 4) ? d.gate : 2;
+    ImGui::Text("Climb: %s   (%s)",
+                d.driving ? "HANDS" : (d.climbing ? "on the wall, stick climbing" : "not climbing"), sGate[gate]);
+    if (gate != 0) {
+        return;
+    }
+    for (int h = 0; h < 2; h++) {
+        if (d.onSurface[h]) {
+            ImGui::Text("%s hand: on %s (%+.0f cm off it)%s%s", h == 0 ? "Left" : "Right",
+                        (d.surfFlags[h] & 0x08) ? "climbable wall" : ((d.surfFlags[h] & 0x02) ? "ladder" : "ladder top"),
+                        d.surfCm[h], d.latched[h] ? "   HOLDING" : "", d.anchor == h ? "   DRIVES" : "");
+        } else {
+            ImGui::Text("%s hand: -%s%s", h == 0 ? "Left" : "Right", d.latched[h] ? "   HOLDING" : "",
+                        d.anchor == h ? "   DRIVES" : "");
+        }
+    }
+    if (d.driving) {
+        ImGui::Text("Body move: %.1f cm asked, %.1f cm done   body %.0f cm from the wall", d.moveCm,
+                    d.achievedCm, d.wallDistCm);
+    }
+    ImGui::Text("Last let go: %s   (toss good for %.0f cm)   hand mounts: %d",
+                d.lastRelease < 0    ? "none yet"
+                : d.lastRelease == 0 ? "dropped"
+                : d.lastRelease == 1 ? "CLIMBED OVER"
+                : d.lastRelease == 2 ? "stepped off at the floor"
+                                     : "got on from the ladder's top",
+                d.lastTossCm, d.mounts);
+}
+
 void SohMenu::AddMenuVRSettings() {
     AddMenuEntry("VR Settings", CVAR_SETTING("Menu.VRSettingsSidebarSection"));
 
@@ -745,6 +1107,20 @@ void SohMenu::AddMenuVRSettings() {
             "jumps, attacks and knockbacks keep their normal motion, and the game still "
             "choreographs Link in cutscenes, on Epona and while climbing. Off = classic OoT "
             "movement."));
+    AddWidget(comfortPath, "Dash in Any Direction", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrDashAnyDirection")
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !CVarGetInteger("gVrEnabled", 1) || !CVarGetInteger("gVrFirstPerson", 1) ||
+                            !CVarGetInteger("gVrBodyFollowsHead", 1);
+        })
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "A with the stick pushed is a dash, targeting or not: stick mostly forward = roll, "
+            "mostly left / right = side hop, mostly back = backflip. Link travels in the exact "
+            "direction the stick points (the quadrant only picks the move), and a roll steers with "
+            "the stick instead of your gaze. Same speeds, distances and no-hop floors as the "
+            "original. A with the stick centred is unchanged (put the sword away / Navi, or the "
+            "targeted jump). Off = the original rules (hops only while targeting, roll only "
+            "forward)."));
     AddWidget(comfortPath, "Legaiaflame's Lock On", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrLegaiaLockOn")
         .PreFunc([](WidgetInfo& info) {
@@ -852,6 +1228,49 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Stick tilt controls how fast you turn (gentle tilt = slow pan, "
                               "full tilt = full speed). Off: any tilt past the deadzone turns "
                               "at the full configured speed."));
+
+    AddWidget(comfortPath, "Body", WIDGET_SEPARATOR_TEXT);
+    AddWidget(comfortPath, "Small Body Collider", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrSmallBody")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Lets you get right up to walls, blocks and ledges, as if you had a small "
+                              "collision radius. Link's real collision is unchanged for everything (climbing, "
+                              "ledges, tunnels, gaps, grabbing): your view is a small circle inside his, so it "
+                              "can get closer to a wall than his body but never past anything that stops "
+                              "him. Needs roomscale. Off: your view stays at his body's distance."));
+    AddWidget(comfortPath, "Small Body Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallBodyRadiusCm")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(8.0f)
+                     .Max(40.0f)
+                     .DefaultValue(15.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close your eyes can get to a wall. Never closer than the headset's near "
+                              "clip allows, and never bigger than Link's own radius."));
+    AddWidget(comfortPath, "Log Small Body (diagnostic)", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBodyLog")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Writes vrbody_log.csv next to the game: one line per tick of what moves your view off "
+            "Link's centre. For debugging only; leave off."));
+    AddWidget(comfortPath, "VrBodyReadout", WIDGET_CUSTOM)
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
+        .CustomFunction([](WidgetInfo& info) {
+            VrBodyDebug d;
+            VrBody_GetDebug(&d);
+            if (!d.active) {
+                ImGui::TextUnformatted("Small body: inactive (VR first person with roomscale only)");
+                return;
+            }
+            const float ws = VR_GetWorldScale() < 1.0f ? 35.0f : VR_GetWorldScale();
+            ImGui::Text("Body radius %.0f cm, yours %.0f cm: view may sit %.0f cm off centre (now %.0f)%s",
+                        d.bigRadius / ws * 100.0f, d.smallRadius / ws * 100.0f, d.slack / ws * 100.0f,
+                        d.offset / ws * 100.0f, d.room ? "   closing in on a wall" : "");
+        })
+        .HideInSearch(true);
 
     AddWidget(comfortPath, "World Scale", WIDGET_SEPARATOR_TEXT);
     AddWidget(comfortPath, "Match Scale To My Height (Be Link-Sized)", WIDGET_CVAR_CHECKBOX)
@@ -1708,38 +2127,54 @@ void SohMenu::AddMenuVRSettings() {
     WidgetPath hudPath = { "VR Settings", "HUD & Menus", SECTION_COLUMN_1 };
 
     AddWidget(hudPath, "HUD", WIDGET_SEPARATOR_TEXT);
+    AddWidget(hudPath, "HUD Layout", WIDGET_CVAR_COMBOBOX)
+        .CVar("gVrHudLayout")
+        .Options(ComboboxOptions()
+                     .DefaultIndex(0)
+                     .ComboMap(vrHudLayoutOptions)
+                     .Tooltip("Wrist Panels: hearts, magic, rupees, keys and timers on your LEFT "
+                              "wrist; item buttons, the A button and the minimap on your RIGHT "
+                              "wrist, each on a small dark panel (VR Settings -> Wrist HUD lays them "
+                              "out). Glance at a hand to read it. "
+                              "Classic: the whole HUD on one panel, in front of you or on one hand. "
+                              "Text boxes always get their own panel in front of you either way."));
     AddWidget(hudPath, "HUD Attachment", WIDGET_CVAR_COMBOBOX)
         .CVar("gVrHudAttach")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = VrHudWristLayout(); })
         .Options(ComboboxOptions()
                      .DefaultIndex(0)
                      .ComboMap(vrHudAttachOptions)
                      .Tooltip("Where the HUD (hearts, rupees, C-button items) lives: floating in "
                               "front of your face, or pinned to a controller like a wrist panel - "
                               "glance at your hand to check your status. Falls back to head-locked "
-                              "while that controller isn't tracked."));
+                              "while that controller isn't tracked. Text boxes are not part of the "
+                              "HUD: they always appear on their own panel in front of you (Text "
+                              "Panel below)."));
     AddWidget(hudPath, "HUD Distance: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudDistance")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) != 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
         .Options(FloatSliderOptions().Min(0.5f).Max(5.0f).DefaultValue(2.0f).Step(0.1f).Format("%.1f"));
     AddWidget(hudPath, "HUD Size: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudSize")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) != 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
         .Options(FloatSliderOptions().Min(0.2f).Max(3.0f).DefaultValue(1.5f).Step(0.05f).Format("%.2f"));
     AddWidget(hudPath, "HUD Horizontal: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudOffX")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) != 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
         .Options(FloatSliderOptions().Min(-1.5f).Max(1.5f).DefaultValue(0.0f).Step(0.02f).Format("%.2f"));
     AddWidget(hudPath, "HUD Vertical: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudOffY")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) != 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
         .Options(FloatSliderOptions().Min(-1.5f).Max(1.5f).DefaultValue(0.0f).Step(0.02f).Format("%.2f"));
     AddWidget(hudPath, "Hand HUD Size: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudHandSize")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) == 0; })
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = VrHudWristLayout() || CVarGetInteger("gVrHudAttach", 0) == 0;
+        })
         .Options(FloatSliderOptions().Min(0.1f).Max(1.0f).DefaultValue(0.35f).Step(0.01f).Format("%.2f"));
     AddWidget(hudPath, "Hand HUD Sideways: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudHandOffX")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) == 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
         .Options(FloatSliderOptions()
                      .Min(-0.5f)
                      .Max(0.5f)
@@ -1750,15 +2185,15 @@ void SohMenu::AddMenuVRSettings() {
                               "the right hand, so one tuning fits both)."));
     AddWidget(hudPath, "Hand HUD Up: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudHandOffY")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) == 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
         .Options(FloatSliderOptions().Min(-0.5f).Max(0.5f).DefaultValue(0.10f).Step(0.01f).Format("%.2f"));
     AddWidget(hudPath, "Hand HUD Forward: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudHandOffZ")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) == 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
         .Options(FloatSliderOptions().Min(-0.5f).Max(0.5f).DefaultValue(-0.08f).Step(0.01f).Format("%.2f"));
     AddWidget(hudPath, "Hand HUD Tilt: %.0f deg", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudHandPitch")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = CVarGetInteger("gVrHudAttach", 0) == 0; })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
         .Options(FloatSliderOptions()
                      .Min(-90.0f)
                      .Max(90.0f)
@@ -1767,6 +2202,54 @@ void SohMenu::AddMenuVRSettings() {
                      .Format("%.0f")
                      .Tooltip("Tilt about the grip so the panel faces your eyes at a natural "
                               "wrist-watch angle."));
+
+    // Text boxes (dialogue, signs, chests, item text) and the ocarina staff always get their own
+    // panel that soft-follows in front of the player; only its placement is configurable. All in
+    // real metres: world scale and Link's age don't change it.
+    AddWidget(hudPath, "Text Panel", WIDGET_SEPARATOR_TEXT);
+    AddWidget(hudPath, "Text Distance: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTextDistance")
+        .Options(FloatSliderOptions()
+                     .Min(0.6f)
+                     .Max(3.0f)
+                     .DefaultValue(1.4f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("How far in front of your eyes text boxes and the ocarina staff appear. "
+                              "Text always floats on its own panel in front of you, whatever the HUD "
+                              "attachment is."));
+    AddWidget(hudPath, "Text Width: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTextWidth")
+        .Options(FloatSliderOptions().Min(0.3f).Max(2.0f).DefaultValue(0.9f).Step(0.05f).Format("%.2f"));
+    AddWidget(hudPath, "Text Height: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTextHeight")
+        .Options(FloatSliderOptions()
+                     .Min(-0.8f)
+                     .Max(0.5f)
+                     .DefaultValue(-0.15f)
+                     .Step(0.01f)
+                     .Format("%.2f")
+                     .Tooltip("Panel centre relative to eye level (negative = below)."));
+    AddWidget(hudPath, "Text Follow Deadzone: %.0f deg", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTextFollowDeg")
+        .Options(FloatSliderOptions()
+                     .Min(5.0f)
+                     .Max(60.0f)
+                     .DefaultValue(20.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How far you can look away before the panel glides back in front of "
+                              "you. Inside this angle it stays perfectly still."));
+    AddWidget(hudPath, "Text Follow Smoothing: %.2f s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTextFollowSpeed")
+        .Options(FloatSliderOptions()
+                     .Min(0.05f)
+                     .Max(1.0f)
+                     .DefaultValue(0.25f)
+                     .Step(0.01f)
+                     .Format("%.2f")
+                     .Tooltip("How long the panel takes to catch up once it starts following. "
+                              "Lower = snappier, higher = floatier."));
 
     AddWidget(hudPath, "Menu Screen", WIDGET_SEPARATOR_TEXT);
     AddWidget(hudPath, "Menu Screen Distance: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
@@ -1790,7 +2273,143 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Width of the floating menu panel in meters (height follows 4:3). "
                               "Applies live."));
 
+    AddWidget(hudPath, "File Select", WIDGET_SEPARATOR_TEXT);
+    AddWidget(hudPath, "File Select in World Space", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrFileSelectWorld")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Stand inside the file select's sky with the menu window floating in front of you, "
+            "where you were looking when it came up. Controls are unchanged. "
+            "Off: the floating menu panel."));
+    AddWidget(hudPath, "File Select Distance: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrFileSelectDistance")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrFileSelectWorld", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.8f)
+                     .Max(3.0f)
+                     .DefaultValue(1.6f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How far in front of you the file select window hangs. It keeps the "
+                              "same apparent size at any distance (use File Select Size for that). "
+                              "Applies live."));
+    AddWidget(hudPath, "File Select Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrFileSelectScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrFileSelectWorld", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(50.0f)
+                     .Max(150.0f)
+                     .DefaultValue(100.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the file select window. At 100% it spans about the same part "
+                              "of your view as it did on a TV. Applies live."));
+    AddWidget(hudPath, "File Select Height: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrFileSelectHeightCm")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrFileSelectWorld", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(-60.0f)
+                     .Max(60.0f)
+                     .DefaultValue(0.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Raise or lower the window relative to your eye height when the file "
+                              "select came up."));
+
+    AddWidget(hudPath, "Pause Menu", WIDGET_SEPARATOR_TEXT);
+    AddWidget(hudPath, "Pause Menu in World Space", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPauseWorldSpace")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "First person: pausing freezes the game but keeps it rendering, so you can still look "
+            "around the frozen world. The four inventory pages surround you where you opened the "
+            "menu, and the whole box spins around you as you change pages. Controls are unchanged. "
+            "Off: the floating menu panel."));
+    AddWidget(hudPath, "Pause Box Radius: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseRadius")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.6f)
+                     .Max(3.0f)
+                     .DefaultValue(1.3f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("Size of the pause box: the distance from its center to each page. "
+                              "Applies live."));
+    AddWidget(hudPath, "Pause View Position: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseViewBack")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(100.0f)
+                     .DefaultValue(100.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Where you stand inside the box. 100% is the original game's camera "
+                              "spot, near the back wall: the front page is farther away and you see "
+                              "all of it, and changing pages swings the box around you the way the "
+                              "original camera moved. 0% puts you at the center, surrounded."));
+    AddWidget(hudPath, "Pause Page Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPausePageScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(40.0f)
+                     .Max(160.0f)
+                     .DefaultValue(100.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Page size. At 100% the four pages meet at the corners and close the "
+                              "box around you (each page spans 90 degrees); smaller pages float "
+                              "apart and are easier to take in at a glance."));
+    AddWidget(hudPath, "Pause Link Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseLinkScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(50.0f)
+                     .Max(250.0f)
+                     .DefaultValue(100.0f)
+                     .Step(5.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the 3D Link standing on the equipment page. 100% matches the "
+                              "original picture; he grows from his feet."));
+    AddWidget(hudPath, "Pause Box Height: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseHeightCm")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(-60.0f)
+                     .Max(60.0f)
+                     .DefaultValue(0.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Raise or lower the pages relative to your eye height when the menu "
+                              "opened."));
+    AddWidget(hudPath, "Pause Name Panel Depth: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPausePanelDepth")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(30.0f)
+                     .Max(95.0f)
+                     .DefaultValue(60.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Distance of the item-name bar, as a percentage of the distance to the "
+                              "front page. It stays the same size on screen; this only sets how close "
+                              "it floats."));
+    AddWidget(hudPath, "Pause World Dim: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseDim")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(90.0f)
+                     .DefaultValue(40.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Darkens the frozen world behind the pages so they read. 0 = no dim."));
+
     // ---------------------------------------------------------------- Performance
+    // --------------------------------------------------------------- Wrist HUD
+    AddSidebarEntry("VR Settings", "Wrist HUD", 1);
+    WidgetPath wristPath = { "VR Settings", "Wrist HUD", SECTION_COLUMN_1 };
+    AddWidget(wristPath, "VrWristHudEditor", WIDGET_CUSTOM).CustomFunction(VrWristHudEditor).HideInSearch(true);
+
     AddSidebarEntry("VR Settings", "Performance", 2);
     WidgetPath perfPath = { "VR Settings", "Performance", SECTION_COLUMN_1 };
 
@@ -2093,6 +2712,253 @@ void SohMenu::AddMenuVRSettings() {
                               "(shockwave, quake, and the thump that flips Tektites and stuns scrubs). "
                               "The same speed into a wall gives the base game's wall strike."));
     AddWidget(devPath, "VrHammerReadout", WIDGET_CUSTOM).CustomFunction(VrHammerReadout).HideInSearch(true);
+    AddWidget(devPath, "Carrying", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Carrying", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysCarry")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Pots, rocks, bushes, crates, bomb flowers, bombs on the ground and cuccos: put "
+                              "your hand on one and squeeze grip to pick it up on the spot. Hold it in one "
+                              "hand or both (squeeze with the other hand on it), open your hand to throw it "
+                              "with your arm. Everything about the object itself (what it reveals, breaking, "
+                              "the cucco glide) is the base game. The A button always still lifts everything the "
+                              "original way; uncheck this to lift ONLY with A (like the original)."));
+    AddWidget(devPath, "Physical Heavy Lifting", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysCarryHeavy")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Silver-gauntlet boulders and golden-gauntlet pillars by hand. Boulder: grip it "
+                              "with one hand (it latches), then the other - it lifts, trails your hands like "
+                              "something heavy, and Link can't move until you open a grip to throw it. "
+                              "Pillar: both hands on its face and both grips, Link hoists it, it stays "
+                              "overhead until you let go, then flies exactly as in the base game. "
+                              "Off: lift them with the A button, like the original."));
+    AddWidget(devPath, "Heavy Throw Strength: %.2fx", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrCarryHeavyThrowScale")
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !CVarGetInteger("gVrPhysCarry", 1) || !CVarGetInteger("gVrPhysCarryHeavy", 1);
+        })
+        .Options(FloatSliderOptions()
+                     .Min(0.5f)
+                     .Max(3.0f)
+                     .DefaultValue(1.0f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("1.00 = real physics for the boulder (it never leaves faster than the base "
+                              "game's own heave)."));
+    AddWidget(devPath, "Heavy Follow: %.2f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrCarryHeavyFollow")
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !CVarGetInteger("gVrPhysCarry", 1) || !CVarGetInteger("gVrPhysCarryHeavy", 1);
+        })
+        .Options(FloatSliderOptions()
+                     .Min(0.05f)
+                     .Max(1.0f)
+                     .DefaultValue(0.3f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("How fast a held boulder catches up with your hands each tick. Lower = heavier "
+                              "(more lag); 1 = rigid."));
+    AddWidget(devPath, "Carry Grab Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrCarryReachCm")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysCarry", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(30.0f)
+                     .DefaultValue(10.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close your hand must be to the object for a grip to pick it up."));
+    AddWidget(devPath, "Carry Throw Strength: %.2fx", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrCarryThrowScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysCarry", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.5f)
+                     .Max(3.0f)
+                     .DefaultValue(1.0f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("1.00 = real physics: a throw lands where the same throw would in real life "
+                              "(matched to each object's gravity). Raise for an arcade arm."));
+    AddWidget(devPath, "Carry Throw Cap: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrCarryThrowMax")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysCarry", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(10.0f)
+                     .Max(60.0f)
+                     .DefaultValue(25.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Fastest a thrown object can leave your hand (game units per tick; the base "
+                              "game's throw is about 14)."));
+    AddWidget(devPath, "Held Objects at Headset Rate", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrCarryLiveDraw")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysCarry", 1); })
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Draw what you hold welded to your live hand, so it moves with it at full headset rate "
+            "instead of trailing at the game's 20 updates a second."));
+    AddWidget(devPath, "VrCarryReadout", WIDGET_CUSTOM)
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysCarry", 1); })
+        .CustomFunction([](WidgetInfo& info) {
+            VrCarryDebug d;
+            VrCarry_GetDebug(&d);
+            if (d.gate != 0) {
+                ImGui::TextUnformatted(d.gate == 1 ? "Carry: off" : "Carry: inactive (selector play only, no horse/water/minigame)");
+                return;
+            }
+            if (d.holding) {
+                ImGui::Text("Carry: HOLDING with %s", d.hands == 3 ? "both hands" : (d.hands == 1 ? "left hand" : "right hand"));
+            } else if (d.nearestCm >= 0.0f) {
+                ImGui::Text("Carry: liftable %.0f cm from your hand: squeeze grip", d.nearestCm);
+            } else {
+                ImGui::TextUnformatted("Carry: nothing offered in reach");
+            }
+            if (d.lastReleaseMps >= 0.0f) {
+                ImGui::Text("Last release: %s at %.1f m/s", d.lastRelease ? "THROWN" : "dropped", d.lastReleaseMps);
+            }
+            if (d.heavy > 0) {
+                ImGui::Text("Boulder: %s", d.heavy == 3   ? "LIFTED (open a grip to throw)"
+                                           : d.heavy == 2 ? "both hands latched (needs Silver Gauntlets)"
+                                                          : "one hand latched: grip it with the other");
+            }
+        })
+        .HideInSearch(true);
+    AddWidget(devPath, "Blocks", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Block Pushing", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysBlockPush")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Put both hands on a push block and squeeze both grips to grab it. Press your "
+                              "hands in to push, draw them back to pull, open either grip to let go. The "
+                              "block moves at the original speed and rhythm BY DESIGN — however hard you "
+                              "shove — so it keeps its weight. The stick and the A button still work as in "
+                              "the base game. Disable for the A-button grab only."));
+    AddWidget(devPath, "Block Grab Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBlockGrabReach")
+        .Options(FloatSliderOptions()
+                     .Min(5.0f)
+                     .Max(30.0f)
+                     .DefaultValue(15.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close to the block's face a hand must be to count as on it (a light tick "
+                              "marks arriving). Both hands on, then squeeze both grips."));
+    AddWidget(devPath, "Block Push Pressure: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBlockPushCm")
+        .Options(FloatSliderOptions()
+                     .Min(3.0f)
+                     .Max(20.0f)
+                     .DefaultValue(8.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How far you press your hands in (or draw them back) from where you grabbed "
+                              "before the block moves. Keep them there to keep it moving; it eases off at "
+                              "half this distance."));
+    AddWidget(devPath, "Block Pull-Off Distance: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBlockPullOff")
+        .Options(FloatSliderOptions()
+                     .Min(15.0f)
+                     .Max(80.0f)
+                     .DefaultValue(35.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Dragging either hand this far from where it took hold lets go of the block, "
+                              "even with the grips still closed."));
+    AddWidget(devPath, "Pin Hands to the Block", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBlockPinHands")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("While you hold a block your hands are drawn on its face and ride it as it "
+                              "moves, instead of following the controllers."));
+    AddWidget(devPath, "Block Haptics: %d%%", WIDGET_CVAR_SLIDER_INT)
+        .CVar("gVrBlockHaptics")
+        .Options(IntSliderOptions()
+                     .Min(0)
+                     .Max(200)
+                     .DefaultValue(100)
+                     .Step(10)
+                     .Format("%d")
+                     .Tooltip("Strength of the grab thunk, the slide rumble and the thunk of each step."));
+    AddWidget(devPath, "VrBlockReadout", WIDGET_CUSTOM).CustomFunction(VrBlockReadout).HideInSearch(true);
+    AddWidget(devPath, "Climbing", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Physical Climbing", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysClimb")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Ladders, vines, climbable fences and rock: put a hand on one and squeeze its "
+                              "grip to take hold, then pull yourself along hand over hand: up, down, sideways, "
+                              "and closer to or away from the wall. Let go of everything near the top and Link "
+                              "climbs over like in the base game; let go anywhere else and you drop, keeping "
+                              "some of your swing. With no hand holding, the stick and A climb as in the base "
+                              "game. Disable for the base game's climbing only."));
+    AddWidget(devPath, "Climb by Walking Into Ladders/Vines", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrClimbWalkIn")
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Walking into a ladder or vines with the stick starts climbing by itself, as in "
+                              "the base game. Off: you take hold with your hands (walking off a ledge onto "
+                              "vines still catches you)."));
+    AddWidget(devPath, "Climb Grab Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrClimbGrabReach")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(60.0f)
+                     .DefaultValue(25.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close the nearest part of your hand (fingertips, palm or wrist) must be to a "
+                              "climbable surface to take hold of it (a light tick marks being in reach). Your "
+                              "hand then snaps onto the surface."));
+    AddWidget(devPath, "Snap Hands onto the Wall", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrClimbSnapHands")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("While a hand holds, it is drawn right on the surface where it took hold instead "
+                              "of exactly at the controller (which may be a little short of it or into it)."));
+    AddWidget(devPath, "Climb-Over Window: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrClimbTopWindowCm")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(100.0f)
+                     .DefaultValue(30.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Letting go anywhere above the height the base game climbs over from (about eye "
+                              "level with the top), or within this distance below it, climbs you over the "
+                              "top. Lower than that you drop. You can pull yourself up past it to the end of "
+                              "the climbable surface."));
+    AddWidget(devPath, "Release Momentum: %d%%", WIDGET_CVAR_SLIDER_INT)
+        .CVar("gVrClimbMomentum")
+        .Options(IntSliderOptions()
+                     .Min(0)
+                     .Max(150)
+                     .DefaultValue(70)
+                     .Step(5)
+                     .Format("%d")
+                     .Tooltip("How much of your body's motion you keep when you let go mid-climb: pull hard "
+                              "and let go to toss yourself up a little. 0 = just drop."));
+    AddWidget(devPath, "Max Toss Height: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrClimbTossCm")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(150.0f)
+                     .DefaultValue(35.0f)
+                     .Step(5.0f)
+                     .Format("%.0f")
+                     .Tooltip("The highest a let-go toss can lift you, however hard you pull (real "
+                              "centimetres, the same as child and adult). Sideways tosses are capped at "
+                              "the same speed."));
+    AddWidget(devPath, "Climb Haptics: %d%%", WIDGET_CVAR_SLIDER_INT)
+        .CVar("gVrClimbHaptics")
+        .Options(IntSliderOptions()
+                     .Min(0)
+                     .Max(200)
+                     .DefaultValue(100)
+                     .Step(10)
+                     .Format("%d")
+                     .Tooltip("Strength of the touch tick, the grab, the rung ticks while you climb, the bump "
+                              "at the end of the climb and the let-go."));
+    AddWidget(devPath, "VrClimbReadout", WIDGET_CUSTOM).CustomFunction(VrClimbReadout).HideInSearch(true);
     AddWidget(devPath, "Hookshot", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Hookshot in Dominant Hand", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrHookshotSwordHand")

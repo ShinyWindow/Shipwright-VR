@@ -412,9 +412,24 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
             s32 vrSelProfile = CVarGetInteger("gVrItemSelect", 1);
             s32 vrOcarina = VrOcarina_InPlay();
             s32 vrHandIdx, vrBtnIdx;
+            // SOH [VR] Pause menu: the grips turn the pages by PHYSICAL side, left grip = page
+            // left, right grip = page right, whatever the gameplay profile binds them to (the
+            // selector profile has the LEFT grip on R = page RIGHT and the right grip on Z = page
+            // LEFT, which read backwards in the world-space inventory). Page-left is Z, or L with
+            // the GameCube switcher enhancement, exactly as KaleidoScope_HandlePageToggles reads it.
+            extern PlayState* gPlayState;
+            s32 vrPauseMenu = (gPlayState != NULL) && (gPlayState->pauseCtx.state != 0) &&
+                              (gPlayState->pauseCtx.debugState == 0);
+            s32 vrPageLeftBtn = CVarGetInteger(CVAR_ENHANCEMENT("NGCKaleidoSwitcher"), 0) ? BTN_L : BTN_Z;
             for (vrHandIdx = 0; vrHandIdx < 2; vrHandIdx++) {
                 uint16_t vrState = (vrHandIdx == 0) ? vrL : vrR;
                 for (vrBtnIdx = 0; vrBtnIdx < 6; vrBtnIdx++) {
+                    if (vrPauseMenu && !vrOcarina && (sVrBtnMasks[vrBtnIdx] == VR_BTN_GRIP)) {
+                        if (vrState & VR_BTN_GRIP) {
+                            vrPad->button |= (vrHandIdx == VR_HAND_LEFT) ? vrPageLeftBtn : BTN_R;
+                        }
+                        continue;
+                    }
                     // SOH [VR] The Alyx-style item selector owns its configured input outright:
                     // its normal binding never fires (the opening click must not leak). In
                     // selector mode both triggers belong to item use, and the two-hand quick-swap
@@ -429,6 +444,9 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
                         VrLens_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrMask_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrHammer_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrBlock_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrCarry_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
+                        VrClimb_GripConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrArchery_PinchConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx]) ||
                         VrCombat_AimTriggerConsumed(vrHandIdx, sVrBtnMasks[vrBtnIdx])) {
                         continue;
@@ -504,13 +522,13 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
         }
 
         // Right thumbstick -> C-buttons ONLY where the game genuinely owns the stick as the
-        // stock C-stick: flat-screen menus (the pause inventory ASSIGNS items with C presses)
-        // and THIRD PERSON. In first-person play the stick NEVER fires items or C-buttons —
+        // stock C-stick: menus (the pause inventory ASSIGNS items with C presses; the world-space
+        // pause menu counts, VrPause_InputMenuMode) and THIRD PERSON. In first-person play the stick NEVER fires items or C-buttons —
         // a stick position is far too easy to graze mid-play; items live on the bindable VR
         // Inputs and the Alyx-style selector, and the X axis belongs to artificial turning.
         float rx = 0.0f, ry = 0.0f;
         VR_GetThumbstick(VR_HAND_RIGHT, &rx, &ry);
-        if (!vrOcaStickClaimed[VR_HAND_RIGHT] && (VR_IsFlatScreen() || !VR_GetFirstPerson())) {
+        if (!vrOcaStickClaimed[VR_HAND_RIGHT] && (VrPause_InputMenuMode() || !VR_GetFirstPerson())) {
             if (ry > 0.5f) vrPad->button |= BTN_CUP;
             if (ry < -0.5f) vrPad->button |= BTN_CDOWN;
             if (rx > 0.5f) vrPad->button |= BTN_CRIGHT;

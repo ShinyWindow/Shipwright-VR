@@ -440,6 +440,271 @@ void VrHookshot_WeldIdleHook(struct Actor* hook, const void* mtx);
 // ArmsHook_Draw can size it with the hand (VrHand_ScaleFactor).
 bool VrHookshot_IdleWelded(struct Actor* hook);
 
+// World-space pause menu (VrPause.cpp, gVrPauseWorldSpace). While WorldSpace() is true the game is
+// frozen exactly as vanilla pauses it, but the world keeps rendering in stereo (no backdrop
+// capture, no flat panel), and the four kaleido pages are a box around the player's head:
+// anchored where the menu opened (center = the head, front = the head's facing), spun by the
+// vanilla page-change camera orbit (inverted, so the box turns rather than the camera), pages at
+// gVrPauseRadius, sized by gVrPausePageScale. Input is untouched: InputMenuMode() reports "a menu
+// owns the controls", exactly as the flat panel did.
+// WorldSpace: VR first person, gate on, paused (not the debug editor, not game over).
+// FrameSync: once per frame from graph.c (VR routing); clears the anchor when the pause ends,
+//   suppresses artificial turning while the box is up, returns WorldSpace().
+// LeanClamp: the roomscale lean allowance (units) for Play_Draw: generous while paused (nothing
+//   moves the body, so the stock 0.1 would freeze head translation) and for a few frames after,
+//   while the body catches up.
+// RefreshCullView: Camera_Update is frozen with the game; rebuild play->view from the live head so
+//   culling follows where the player looks.
+// BeginDraw: start of KaleidoScope_Draw; anchors on the first draw of a pause, builds this
+//   frame's spin, draws the world dim (into the current list, before the pages).
+// PageTranslate: the page placement (replaces Matrix_Translate(x, y, z, MTXMODE_NEW) in
+//   KaleidoScope_DrawPages): box base x vanilla translate x page scale.
+// PanelMatrix: the name panel's base (replaces Matrix_Translate(0, 0, -144, MTXMODE_NEW)).
+bool VrPause_WorldSpace(void);
+bool VrPause_InputMenuMode(void);
+bool VrPause_FrameSync(void);
+float VrPause_LeanClamp(void);
+void VrPause_RefreshCullView(struct PlayState* play);
+void VrPause_BeginDraw(struct PlayState* play);
+void VrPause_PageTranslate(float x, float y, float z);
+void VrPause_PanelMatrix(void);
+
+// World-space file select (VrFileSelect.cpp, gVrFileSelectWorld). While WorldSpace() is true the
+// file select renders in stereo instead of on the floating panel: its sky surrounds the player and
+// the menu window hangs in front of them, anchored where they looked when the file select came up
+// (gVrFileSelectDistance metres away, gVrFileSelectScale, gVrFileSelectHeightCm). Its screen-space
+// rectangles land on a virtual TV screen in the window's plane (VR_SetRectWorldPanel). Input is
+// untouched; the N64 logo and the title demo keep their own paths.
+// SetActive: FileChoose_Init (true) / FileChoose_Destroy (false). The gate is this game state
+//   explicitly, never "no PlayState" (the N64 logo has none either).
+// WorldSpace: VR on, gate on, the file select running.
+// FrameSync: once per frame from graph.c, AFTER VrPause_FrameSync: suppresses artificial turning
+//   while active, clears the rect panel and the anchor when not; returns WorldSpace().
+// BeginFrame: start of FileChoose_Main: the VR camera duties Play_Draw would do (hand-matrix clear,
+//   first person, origin anchor), anchors on the first frame, publishes the rect panel.
+// WindowTranslate: replaces Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW) at every window site.
+// SkyPose: replaces the orbiting sky eye with the live head and turns the sky cube instead
+//   (orbit = ZREG(11)); leaves everything untouched when not WorldSpace().
+void VrFileSelect_SetActive(bool active);
+bool VrFileSelect_WorldSpace(void);
+bool VrFileSelect_FrameSync(void);
+void VrFileSelect_BeginFrame(void);
+void VrFileSelect_WindowTranslate(void);
+void VrFileSelect_SkyPose(int16_t orbit, float* eyeX, float* eyeY, float* eyeZ, float* skyRotY);
+
+// Physical block pushing (VrBlock.cpp, gVrPhysBlockPush — VR first person with motion hands). The
+// hands are INTENT for the vanilla grab, nothing else: both hands on a pushable's face (WALL_FLAG
+// 0x40 dynapoly or scene wall, never Bg_Heavy_Block) + both grips freshly squeezed = the A button
+// of the grab; either grip opening (or pulling a hand gVrBlockPullOff away) = letting go of A.
+// While attached, pressing the hands in (or drawing them back) past gVrBlockPushCm, measured in
+// the player's own frame (hand relative to the head, along Link's facing), is the stick held
+// forward (back): the block moves at the vanilla cadence however hard you shove. The stick still
+// wins whenever it is pushed. The block, the actions, speed, step and rest are untouched.
+// Tick: once per Player_UpdateCommon, before the action function (grips, reach, pressure, haptics).
+// GrabHeld: the A substitute at the grab handler and the hold gate (func_8083F9D0).
+// Intent: replaces func_8083FFB8's result at the three intent sites (+1 push, -1 pull, 0 hold).
+// GripConsumed: a grip on the block (or at a pushable face) loses its binding and the sword chord.
+// PinnedHandMatrix: while attached by hand, the hand limb is drawn riding the block face (MtxF
+// layout, in: the live hand matrix, out: the pinned one); false = draw the controller as usual.
+void VrBlock_Tick(struct PlayState* play, struct Player* player);
+bool VrBlock_GrabHeld(struct Player* player);
+int32_t VrBlock_Intent(struct Player* player, int32_t stickIntent);
+bool VrBlock_GripConsumed(int32_t hand, uint16_t mask);
+bool VrBlock_PinnedHandMatrix(struct Player* player, int32_t vrHand, float* mf16);
+typedef struct VrBlockDebug {
+    int32_t gate;        // 0 armed; 1 Physical Block Pushing off; 2 not VR first person / motion hands off;
+                         // 3 cutscene / horse / water / transition
+    int32_t pushable;    // Link is touching a pushable face
+    int32_t atWall[2];   // each hand is on the face (within reach of its plane, in front of Link)
+    float planeCm[2];    // each hand's signed distance to the face (+ in front, - inside); -999 unmeasured
+    int32_t latched[2];  // each grip was squeezed fresh at the face and is still held
+    int32_t action;      // 0 not grabbing, 1 putting the item away, 2 holding, 3 pushing, 4 pulling
+    int32_t handGrab;    // attached by the hands (0 while attached = an A-button grab)
+    float pressureCm;    // hands along Link's facing since the grab (+ in, - back)
+    float pushCm;        // threshold for push / pull
+    float reachCm;       // grab reach
+    int32_t intent;      // +1 push, -1 pull, 0 hold
+    float driftCm;       // the hand furthest from where it took hold
+    float pullOffCm;     // drift past this lets go
+    int32_t blockMoving; // the block moved last tick
+    int32_t steps;       // steps landed during this grab
+    int32_t lastRelease; // -1 none yet, 0 grip opened, 1 pulled off, 2 Link left the grab
+} VrBlockDebug;
+void VrBlock_GetDebug(VrBlockDebug* out);
+// Small body collider (VrBody.cpp, gVrSmallBody — VR first person with roomscale). Link's body keeps
+// the vanilla wall radius for everything; the view (and the hands on the same anchor) is a small
+// circle (gVrSmallBodyRadiusCm) living inside that big circle, so it can get closer to walls than the
+// body but can never leave the body's circle — never past anything the body is held back by.
+// Active: the feature applies this frame.
+// NoteWallPushout (Actor_UpdateBgCheckInfo): the wall push-out the player's body just took.
+// BeginCollision / EndCollision (around Player_ProcessSceneCollision in the movement branch): the
+//   push-out of the stick's movement stays in the view; returns true while the view still has room
+//   toward the wall Link touches — the caller then lifts the vanilla facing-a-wall speed cap so the
+//   view arrives at walking speed instead of creeping.
+// ClampView (Play_Draw, first-person anchor): clamps the view to the disk; head[3] (game units,
+//   Link's head with the head offset unswept) is rewritten; false = not active (old path: swept
+//   head offset + lean clamp).
+bool VrBody_Active(void);
+void VrBody_NoteWallPushout(struct Actor* actor, float dx, float dz);
+void VrBody_BeginCollision(struct Player* player);
+bool VrBody_EndCollision(struct PlayState* play, struct Player* player);
+bool VrBody_ClampView(struct PlayState* play, struct Player* player, float* head);
+// NoteObjectPush (CollisionCheck_SetOCvsOC): the object-collision push the player's body takes from a
+//   STATIC object (anything but NPCs, enemies, bosses, explosives, held or moving actors: pots, rocks,
+//   torches, boulders, signs...); fed to the view like a wall push-out. pusherPos (x,y,z) = the pusher's
+//   collider position, contactDist = how far apart the two collider centres are at contact.
+// ClampBodyMove (the roomscale body move): the body moving toward the head (swept against walls only)
+//   also stops at those objects' edges (the light liftables by their known collider, everything else by
+//   the contact distance remembered from its last push), so a view leaning over a rock never drags the
+//   body into it (or into a grotto hole under it).
+void VrBody_NoteObjectPush(struct Actor* pusher, struct Actor* pushed, float dx, float dz, const float* pusherPos,
+                           float contactDist);
+void VrBody_ClampBodyMove(struct PlayState* play, struct Player* player, const float* from, float* to);
+// VrCarry.cpp: the light static liftables (not cuccos / bombs, not held) and their collider cylinder.
+bool VrCarry_LightObjectCylinder(struct Actor* actor, float* radius, float* height, float* yShift);
+typedef struct VrBodyDebug {
+    int32_t active;    // the small body applies
+    float slack;       // how far the view may sit from Link's centre (big - small), units
+    float smallRadius; // units
+    float bigRadius;   // the radius the body collides with now (crawling = 10), units
+    float offset;      // the view's offset from Link's centre this tick, units
+    int32_t room;      // touching a wall with room left toward it (speed cap lifted)
+} VrBodyDebug;
+void VrBody_GetDebug(VrBodyDebug* out);
+
+// Physical climbing (VrClimb.cpp, gVrPhysClimb — VR first person with motion hands). Every climbable
+// polygon carries the SurfaceType wall flags 0x02 (ladder), 0x04 (ladder top) or 0x08 (vines,
+// fences, climbable rock), steep (|normal.y| < 600); a hand on (or within gVrClimbGrabReach of) one
+// + a FRESH grip there = hold, and the drawn hand snaps onto the surface. Ladders and vines behave
+// the same. The vanilla climb action (Player_Action_8084BF1C, PLAYER_STATE1_CLIMBING_LADDER) stays
+// the state: while any hand holds, Link's body moves opposite to the last-grabbed hand 1:1 in 3D:
+// along the wall, and toward / away from it (the wall glue's distance follows the arms; the view
+// never closer than ~10 cm), instead of by the stick's step animations. The vanilla wall glue, bg
+// check and randomizer climb gate (VB_CLIMB) run on every move, so the climbable area's edges stop
+// you. Letting go of everything at or above (or within gVrClimbTopWindowCm below) where vanilla would
+// climb over plays vanilla's climb-over (or the ladder dismount right at its rung); at the floor it
+// steps off; anywhere else Link drops keeping a capped share of the body's last motion
+// (gVrClimbMomentum %, gVrClimbTossCm max rise). With no hand holding (or physical climbing off) the
+// climb is vanilla: stick + A.
+// Tick: once per Player_UpdateCommon, before the action function (grips, hand probes, latches).
+// TakeMount: a hand took hold of a climbable surface this tick while Link isn't climbing; fills the
+//   polygon, its bgId and the hand's contact point for Player_VrClimbMount (called from the grab
+//   handler on the ground and from the jump/fall action in the air).
+// Step: inside the climb action. 0 = no hand holds, vanilla runs; 1 = move the body by outMove
+//   (units, 3D); 2 = the last hand let go this tick: apply outMove (its last motion), then resolve.
+// Moved: the body's achieved move this tick (units, the wall's own motion excluded) and its distance
+//   from the wall; true = a rung's worth of travel: play the vanilla climbing sound.
+// HandSnapOffset: while a hand holds, it is drawn this far (world units) from its controller: on
+//   the surface where it took hold (gVrClimbSnapHands).
+// Launch: the release velocity (units/tick) for a drop, momentum share applied and capped.
+// SuppressVanillaGrab: after a physical release Link is falling on purpose — vanilla's automatic
+//   re-grab of the climbable wall he falls along must not catch him. Clears on landing.
+// BlockWalkInMount: walking into a ladder/vine with the stick doesn't auto-climb (gVrClimbWalkIn off).
+// GripConsumed: a grip holding the wall (or on a climbable surface, about to) loses its binding.
+// FrameSync (graph.c, every frame): turns the view lock off whenever the player isn't ticking
+//   (pause, transitions); true while climbing physically = artificial turning stays off.
+typedef struct VrClimbHit {
+    void* poly; // CollisionPoly* (an anonymous-struct typedef: no tag to forward-declare)
+    int32_t bgId;
+    float pos[3];
+    int32_t hand;
+} VrClimbHit;
+void VrClimb_Tick(struct PlayState* play, struct Player* player);
+bool VrClimb_TakeMount(struct PlayState* play, struct Player* player, VrClimbHit* out);
+int32_t VrClimb_Step(struct PlayState* play, struct Player* player, float outMove[3]);
+bool VrClimb_Moved(struct Player* player, const float achieved[3], float wallDistUnits);
+bool VrClimb_HandSnapOffset(struct Player* player, int32_t hand, float out[3]);
+void VrClimb_Launch(struct Player* player, float outVel[3]);
+void VrClimb_NoteResolved(struct Player* player, int32_t how);
+// Active: physical climbing applies to this player this tick (gate open).
+bool VrClimb_Active(struct Player* player);
+bool VrClimb_SuppressVanillaGrab(struct Player* player);
+bool VrClimb_BlockWalkInMount(struct Player* player);
+float VrClimb_TopWindowUnits(void);
+bool VrClimb_GripConsumed(int32_t hand, uint16_t mask);
+bool VrClimb_FrameSync(void);
+typedef struct VrClimbDebug {
+    int32_t gate;         // 0 armed; 1 Physical Climbing off; 2 not VR first person / motion hands off;
+                          // 3 cutscene / horse / transition
+    int32_t onSurface[2]; // each hand is on a climbable surface
+    int32_t surfFlags[2]; // the wall flags under each hand (0x02 ladder, 0x04 ladder top, 0x08 climbable)
+    float surfCm[2];      // the closest part of each hand from the surface (+ short of it, - into it)
+    int32_t latched[2];   // each hand is holding
+    int32_t anchor;       // the hand that drives the body (-1 none)
+    int32_t climbing;     // Link is in the climb (PLAYER_STATE1_CLIMBING_LADDER)
+    int32_t driving;      // the hands move the body (0 = vanilla stick climbing)
+    float wallDistCm;     // Link's body from the wall (vanilla holds it at 15 units)
+    float moveCm;         // body move requested this tick
+    float achievedCm;     // body move achieved this tick
+    int32_t lastRelease;  // -1 none yet, 0 dropped, 1 climbed over the top, 2 stepped off at the floor,
+                          // 3 got onto a ladder from its top
+    float lastTossCm;     // the rise the last drop's launch was good for
+    int32_t mounts;       // hand mounts this session
+} VrClimbDebug;
+void VrClimb_GetDebug(VrClimbDebug* out);
+
+// Physical carrying (VrCarry.cpp, gVrPhysCarry — selector mode, motion hands). The light liftables
+// (pots, small rocks, bushes, crates, bomb flowers, grounded bombs, cuccos) are picked up by a fresh
+// grip with the hand on one that offered itself to be carried — instantly, no lift animation — held
+// rigidly in one hand or both, and thrown with the object's real velocity at release. The offer, the
+// carrying state, the object's reactions and its flight are all vanilla.
+// NoteOffer (Actor_OfferGetItem): every GI_NONE carry offer in range is a candidate for a hand, not
+//   only the one Link faces most (the vanilla pick).
+// Tick: once per Player_UpdateCommon before the action (grips, pick up, join, hand-over, throw).
+// UpdateCarryPose (player draw, after vanilla places the held actor): the hold pose.
+// GripConsumed: the holding hand(s), a free hand at the held object, and a hand on a liftable lose
+//   their grip binding (and the sword chord).
+// BeginDrawWeld / EndDrawWeld (Actor_Draw around actor->draw): while the held object draws, every
+//   Mtx it makes is welded to the live hand (gVrMtxWeldHand -> Matrix_ToMtx), so it moves at headset
+//   rate instead of the 20 Hz tick.
+void VrCarry_NoteOffer(struct Actor* actor);
+void VrCarry_Tick(struct PlayState* play, struct Player* player);
+void VrCarry_UpdateCarryPose(struct Player* player);
+bool VrCarry_GripConsumed(int32_t hand, uint16_t mask);
+bool VrCarry_BeginDrawWeld(struct Actor* actor);
+void VrCarry_EndDrawWeld(void);
+typedef struct VrCarryDebug {
+    int32_t gate;         // 0 armed; 1 Physical Carrying off; 2 not selector play / horse / water / minigame
+    int32_t holding;      // something is held by hand
+    int32_t primary;      // the hand the draw welds to (-1 none)
+    int32_t hands;        // bit 0 left, bit 1 right
+    float nearestCm;      // not holding: the nearest offered liftable to a hand (-1 none in reach)
+    int32_t lastPickUp;   // actor id of the last pick-up (-1 none yet)
+    float lastReleaseMps; // the object's speed at the last release, m/s (-1 none yet)
+    int32_t lastRelease;  // 0 dropped, 1 thrown
+    int32_t heavy;        // the boulder: 0 none, 1 one hand latched, 2 both latched (not lifting), 3 lifted
+} VrCarryDebug;
+// PinnedHandMatrix (hand-limb draw): a hand latched on a silver boulder is drawn on it (MtxF layout, in:
+//   the live hand matrix, out: pinned); false = draw the controller as usual.
+bool VrCarry_PinnedHandMatrix(struct Player* player, int32_t vrHand, float* mf16);
+// z_player.c: the vanilla boulder lift without its animation: put away what is held, the boulder action
+//   (Player_Action_80846260, Link rooted) in its holding loop, the boulder attached. 1 lifted, 0 refused,
+//   -1 too heavy (no Silver Gauntlets). The release is Player_VrCarryRelease (which also stands Link up).
+int32_t Player_VrCarryPickUpHeavy(struct PlayState* play, struct Player* player, struct Actor* actor);
+// z_player.c: Link is lifting a gauntlet pillar (its put-away or the lift action) — the hands then follow
+//   his animation instead of the controllers, so the pillar's pose and throw are the base game's.
+int32_t Player_VrPillarLift(struct Player* player);
+// VrBlock.cpp: a pillar lift begun by the hands is held overhead (the frame before the vanilla throw)
+//   while both grips stay closed; letting go throws it.
+bool VrBlock_PillarHold(struct Player* player);
+void VrCarry_GetDebug(VrCarryDebug* out);
+// Implemented in z_player.c (// SOH [VR]). CarryPickUp: the vanilla lift without its animation —
+// put away what is held, then exactly the lift's attach frame (heldActor / parent / carrying state /
+// carry upper action). 1 lifted, 0 refused (Link busy), -1 too heavy (no bracelet). CarryRelease:
+// the held object leaves with `velocity` (units/tick), then the vanilla post-throw detach.
+int32_t Player_VrCarryPickUp(struct PlayState* play, struct Player* player, struct Actor* actor);
+void Player_VrCarryRelease(struct PlayState* play, struct Player* player, const float* velocity);
+// z_player_lib.c: the hand every Mtx made by Matrix_ToMtx is welded to (-1 = none), and the weld itself
+// (Player_VrWeldMtxToHand on gPlayState; a no-op without this frame's hand snapshot).
+extern int32_t gVrMtxWeldHand;
+void Player_VrWeldCurrentMtx(const void* mtx, const float* curMf16);
+
+// Implemented in z_player.c (// SOH [VR]). BlockAction: which part of the vanilla grab Link is in
+// (0 none, 1 putting the held item away first, 2 hold, 3 push, 4 pull). TouchingPushable: the wall
+// half of the vanilla "Grab" prompt — touching a WALL_FLAG 0x40 face (sTouchedWallFlags).
+int32_t Player_VrBlockAction(struct Player* player);
+int32_t Player_VrTouchingPushable(struct Player* player);
+
 #ifdef __cplusplus
 }
 

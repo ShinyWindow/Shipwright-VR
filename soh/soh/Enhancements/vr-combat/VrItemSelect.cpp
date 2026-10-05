@@ -100,11 +100,12 @@ int SelectorHand() {
     return CVarGetInteger("gVrItemSelHand", 0) == 0 ? swordHand : (1 - swordHand);
 }
 
-// Selector mode owns item activation: the toggle, in VR first person. Third person and flat
-// screen keep stock behavior (there the right thumbstick is the C-stick, as it always was).
+// Selector mode owns item activation: the toggle, in VR first person. Third person and menus
+// (flat screen, or the world-space pause menu) keep stock behavior (there the right thumbstick is
+// the C-stick, as it always was).
 bool SelectorModeInPlay() {
     return CVarGetInteger("gVrItemSelect", 1) && VR_IsInitialized() && VR_GetFirstPerson() &&
-           !VR_IsFlatScreen();
+           !VrPause_InputMenuMode();
 }
 
 // Which VR controller physically holds the current held item, or -1 when Link's hands are empty.
@@ -159,6 +160,23 @@ bool SwapChordHeld() {
                                  VrHammer_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
         return false;
     }
+    // Same for grips on a pushable block (or at its face, about to grab it): both grips there are
+    // the grab, not a request for the sword.
+    if ((mask & VR_BTN_GRIP) && (VrBlock_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrBlock_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
+        return false;
+    }
+    // Same for grips carrying something (or about to grab it): picking up / holding with both
+    // hands is not a request for the sword.
+    if ((mask & VR_BTN_GRIP) && (VrCarry_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrCarry_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
+        return false;
+    }
+    // And grips holding a climbable wall (or on one, about to): climbing hand over hand squeezes both.
+    if ((mask & VR_BTN_GRIP) && (VrClimb_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrClimb_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
+        return false;
+    }
     return mask != 0 && (VR_GetControllerButton(VR_HAND_LEFT) & mask) != 0 &&
            (VR_GetControllerButton(VR_HAND_RIGHT) & mask) != 0;
 }
@@ -190,7 +208,7 @@ bool SelectorAvailable() {
     if (OcarinaInPlay()) {
         return false;
     }
-    if (!VR_IsInitialized() || !VR_GetFirstPerson() || VR_IsFlatScreen()) {
+    if (!VR_IsInitialized() || !VR_GetFirstPerson() || VrPause_InputMenuMode()) {
         return false;
     }
     if (!GameInteractor::IsSaveLoaded(true) || gPlayState == NULL) {

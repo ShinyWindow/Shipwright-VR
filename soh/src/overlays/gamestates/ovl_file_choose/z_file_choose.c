@@ -24,6 +24,7 @@
 #include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/ShipUtils.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
 
 #define MIN_QUEST (ResourceMgr_GameHasOriginal() ? QUEST_NORMAL : QUEST_MASTER)
 #define MAX_QUEST QUEST_BOSSRUSH
@@ -2092,6 +2093,8 @@ void FileChoose_ConfigModeDraw(GameState* thisx) {
     eyeX = 1000.0f * Math_CosS(ZREG(11)) - 1000.0f * Math_SinS(ZREG(11));
     eyeY = ZREG(13);
     eyeZ = 1000.0f * Math_SinS(ZREG(11)) + 1000.0f * Math_CosS(ZREG(11));
+    // SOH [VR] World-space file select: the sky centres on the live head and turns instead.
+    VrFileSelect_SkyPose(ZREG(11), &eyeX, &eyeY, &eyeZ, &this->skyboxCtx.rot.y);
 
     FileChoose_SetView(this, eyeX, eyeY, eyeZ);
     SkyboxDraw_Draw(&this->skyboxCtx, this->state.gfxCtx, 1, this->envCtx.skyboxBlend, eyeX, eyeY, eyeZ);
@@ -2116,7 +2119,7 @@ void FileChoose_ConfigModeDraw(GameState* thisx) {
                         this->windowAlpha);
         gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, 0);
 
-        Matrix_Translate(0.0f, 0.0f, -93.6f, MTXMODE_NEW);
+        VrFileSelect_WindowTranslate(); // SOH [VR] vanilla: Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW)
         Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
 
         if (this->windowRot != 0) {
@@ -2152,7 +2155,7 @@ void FileChoose_ConfigModeDraw(GameState* thisx) {
                         this->windowAlpha);
         gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, 0);
 
-        Matrix_Translate(0.0f, 0.0f, -93.6f, MTXMODE_NEW);
+        VrFileSelect_WindowTranslate(); // SOH [VR] vanilla: Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW)
         Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
         // Invert name select when switching from randomizer settings menu to name entry, otherwise
         // it'll show on the backside while rotating to the menu.
@@ -2189,7 +2192,7 @@ void FileChoose_ConfigModeDraw(GameState* thisx) {
                         this->windowAlpha);
         gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, 0);
 
-        Matrix_Translate(0.0f, 0.0f, -93.6f, MTXMODE_NEW);
+        VrFileSelect_WindowTranslate(); // SOH [VR] vanilla: Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW)
         Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
         Matrix_RotateX((this->windowRot - 314.0f) / 100.0f, MTXMODE_APPLY);
 
@@ -2226,7 +2229,7 @@ void FileChoose_ConfigModeDraw(GameState* thisx) {
                         this->windowAlpha);
         gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, 0);
 
-        Matrix_Translate(0.0f, 0.0f, -93.6f, MTXMODE_NEW);
+        VrFileSelect_WindowTranslate(); // SOH [VR] vanilla: Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW)
         Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
         Matrix_RotateX((this->windowRot - 314.0f) / 100.0f, MTXMODE_APPLY);
 
@@ -2259,7 +2262,7 @@ void FileChoose_ConfigModeDraw(GameState* thisx) {
                         this->windowAlpha);
         gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, 0);
 
-        Matrix_Translate(0.0f, 0.0f, -93.6f, MTXMODE_NEW);
+        VrFileSelect_WindowTranslate(); // SOH [VR] vanilla: Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW)
         Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
         Matrix_RotateX((this->windowRot - 628.0f) / 100.0f, MTXMODE_APPLY);
 
@@ -2600,6 +2603,8 @@ void FileChoose_SelectModeDraw(GameState* thisx) {
     eyeX = 1000.0f * Math_CosS(ZREG(11)) - 1000.0f * Math_SinS(ZREG(11));
     eyeY = ZREG(13);
     eyeZ = 1000.0f * Math_SinS(ZREG(11)) + 1000.0f * Math_CosS(ZREG(11));
+    // SOH [VR] World-space file select: the sky centres on the live head and turns instead.
+    VrFileSelect_SkyPose(ZREG(11), &eyeX, &eyeY, &eyeZ, &this->skyboxCtx.rot.y);
 
     FileChoose_SetView(this, eyeX, eyeY, eyeZ);
     SkyboxDraw_Draw(&this->skyboxCtx, this->state.gfxCtx, 1, this->envCtx.skyboxBlend, eyeX, eyeY, eyeZ);
@@ -2617,7 +2622,7 @@ void FileChoose_SelectModeDraw(GameState* thisx) {
                     this->windowAlpha);
     gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, 0);
 
-    Matrix_Translate(0.0f, 0.0f, -93.6f, MTXMODE_NEW);
+    VrFileSelect_WindowTranslate(); // SOH [VR] vanilla: Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW)
     Matrix_Scale(0.78f, 0.78f, 0.78f, MTXMODE_APPLY);
     Matrix_RotateX(this->windowRot / 100.0f, MTXMODE_APPLY);
     gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(this->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
@@ -2758,6 +2763,7 @@ void FileChoose_Main(GameState* thisx) {
     gSPSegment(POLY_OPA_DISP++, 0x02, this->parameterSegment);
 
     Gfx_SetupFrame(this->state.gfxCtx, 0, 0, 0);
+    VrFileSelect_BeginFrame(); // SOH [VR] world-space file select: camera anchor, rect panel
 
     this->stickRelX = input->rel.stick_x;
     this->stickRelY = input->rel.stick_y;
@@ -3097,6 +3103,7 @@ void FileChoose_InitContext(GameState* thisx) {
 }
 
 void FileChoose_Destroy(GameState* thisx) {
+    VrFileSelect_SetActive(false); // SOH [VR]
 }
 
 void FileChoose_Init(GameState* thisx) {
@@ -3137,4 +3144,5 @@ void FileChoose_Init(GameState* thisx) {
     }
     Audio_QueueSeqCmd(0xF << 28 | SEQ_PLAYER_BGM_MAIN << 24 | 0xA);
     Audio_PlaySequenceWithSeqPlayerIO(SEQ_PLAYER_BGM_MAIN, NA_BGM_FILE_SELECT, 0, 7, 1);
+    VrFileSelect_SetActive(true); // SOH [VR]
 }

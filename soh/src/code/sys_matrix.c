@@ -1,6 +1,7 @@
 #include "global.h"
 
 #include "soh/frame_interpolation.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 #include "soh/Enhancements/savestate_serialize.h"
 #include <assert.h>
 
@@ -562,6 +563,11 @@ Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
 Mtx* Matrix_ToMtx(Mtx* dest, char* file, s32 line) {
     FrameInterpolation_RecordMatrixToMtx(dest, file, line);
     guMtxF2L(Matrix_CheckFloats(sCurrentMatrix, file, line), dest);
+    // SOH [VR] Physical carrying: while a held object draws, each matrix it emits is welded to the
+    // live hand (headset rate) instead of riding the 20 Hz pose.
+    if (gVrMtxWeldHand >= 0) {
+        Player_VrWeldCurrentMtx(dest, &sCurrentMatrix->mf[0][0]);
+    }
     return dest;
     // return Matrix_MtxFToMtx(MATRIX_CHECKFLOATS(sCurrentMatrix), dest);
 }

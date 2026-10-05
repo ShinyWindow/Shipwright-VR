@@ -1407,6 +1407,12 @@ extern "C" bool VrCombat_MeleeQuadsHit(void) {
 }
 
 extern "C" void VrCombat_FeedMelee(PlayState* play, Player* player) {
+    // The world-space pause menu draws Link while the game is frozen. A frozen frame is not a
+    // swing: no tier change, no sim feed, no trail, no haptics (before that menu, nothing of Link
+    // ran while paused). The sword still renders on the live hand through the limb override.
+    if (play->pauseCtx.state != 0 || play->pauseCtx.debugState != 0) {
+        return;
+    }
     EnsureQuads(play, player);
 
     // A weapon change invalidates the sparse-tick fallback line (it belongs to the old weapon).

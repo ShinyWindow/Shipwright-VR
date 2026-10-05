@@ -11,6 +11,8 @@
 #include "soh/Enhancements/gameconsole.h"
 #include "soh/OTRGlobals.h"
 #include <vr_interface.h>
+#include "soh/Enhancements/vr-combat/VrCombat.h"
+#include <libultraship/log/luslog.h>
 
 #define GFXPOOL_HEAD_MAGIC 0x1234
 #define GFXPOOL_TAIL_MAGIC 0x5678
@@ -326,10 +328,27 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
     // inventory pages AND the pause background-capture command), which must render into the
     // floating panel as one image, NOT onto the HUD quad: with the HUD pinned to a hand, the
     // inventory would end up on the player's wrist while the panel stays black.
+    // The world-space pause menu (VrPause.cpp) is the exception: the frozen world keeps rendering
+    // in stereo and the kaleido pages are drawn into it, so that pause is NOT a flat context.
+    // Text boxes are the exception to "overlay = HUD quad": outside flat contexts the message
+    // system's list moves to its own soft-follow panel (Message_VrRouteText, z_message_PAL.c).
     if (VR_IsInitialized()) {
         extern PlayState* gPlayState;
-        s32 vrFlatScreen = (gPlayState == NULL) || (gPlayState->pauseCtx.state != 0);
+        extern void Message_VrRouteText(s32 toPanel);
+        s32 vrPauseWorldSpace = VrPause_FrameSync();
+        // The world-space file select (VrFileSelect.cpp) is the other exception: its sky and menu
+        // window render in stereo. After VrPause_FrameSync: both write the turn-suppression flag.
+        s32 vrFileSelectWorldSpace = VrFileSelect_FrameSync();
+        // SOH [VR] Physical climbing: the view is locked to the gripping hand — an artificial turn
+        // would swing the playspace around the hand mid-pull (VrClimb.cpp). Also drops the lock
+        // whenever the player isn't ticking (pause, transitions).
+        if (VrClimb_FrameSync()) {
+            VR_SetTurnSuppressed(1);
+        }
+        s32 vrFlatScreen = (gPlayState == NULL) ? !vrFileSelectWorldSpace
+                                                : (gPlayState->pauseCtx.state != 0 && !vrPauseWorldSpace);
         VR_SetFlatScreen(vrFlatScreen);
+        Message_VrRouteText(!vrFlatScreen);
         if (vrFlatScreen) {
             gSPBranchList(POLY_XLU_DISP++, gfxCtx->overlayBuffer);
             VR_SetOverlayDisplayList(NULL);
@@ -413,6 +432,35 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         osSyncPrintf("%c", BEL);
         // "Zelda 4 is dead"
         osSyncPrintf(VT_COL(RED, WHITE) "ゼルダ4は死んでしまった(graph_alloc is empty)\n" VT_RST);
+    }
+
+    // SOH [VR] The arena checks above are silent here (game prints are compiled out) and a crashed
+    // arena has already written out of bounds by the time it's detected. The world-space pause menu
+    // puts the whole frozen world AND the whole kaleido into polyOpa in the same frame, which
+    // vanilla never does, so report overflows, and the tightest headroom seen during each such pause.
+    {
+        static s32 sVrPauseMinFree = 0x7FFFFFFF;
+        static s32 sVrPauseWasWorldSpace = false;
+        s32 vrPauseWorldSpace = VrPause_WorldSpace();
+        s32 opaFree = THGA_GetSize(&gfxCtx->polyOpa);
+
+        if (problem) {
+            lusprintf(__FILE__, __LINE__, 4,
+                      "[VR] gfx arena overflow, frame dropped: polyOpa free %d of %d, polyXlu free %d of %d, "
+                      "overlay free %d of %d (world-space pause %d)",
+                      opaFree, (s32)gfxCtx->polyOpa.size, THGA_GetSize(&gfxCtx->polyXlu), (s32)gfxCtx->polyXlu.size,
+                      THGA_GetSize(&gfxCtx->overlay), (s32)gfxCtx->overlay.size, vrPauseWorldSpace);
+        }
+        if (vrPauseWorldSpace) {
+            if (opaFree < sVrPauseMinFree) {
+                sVrPauseMinFree = opaFree;
+            }
+        } else if (sVrPauseWasWorldSpace) {
+            lusprintf(__FILE__, __LINE__, 2, "[VR] world-space pause: polyOpa min free %d of %d bytes",
+                      sVrPauseMinFree, (s32)gfxCtx->polyOpa.size);
+            sVrPauseMinFree = 0x7FFFFFFF;
+        }
+        sVrPauseWasWorldSpace = vrPauseWorldSpace;
     }
 
     if (!problem) {

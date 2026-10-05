@@ -1751,6 +1751,10 @@ void Actor_UpdateBgCheckInfo(PlayState* play, Actor* actor, f32 wallCheckHeight,
              BgCheck_EntitySphVsWall4(&play->colCtx, &sp64, &actor->world.pos, &actor->prevPos, wallCheckRadius,
                                       &actor->wallPoly, &bgId, actor, wallCheckHeight))) {
             wallPoly = actor->wallPoly;
+            // SOH [VR] Small body collider (VrBody): the push-out Link's body takes from walls.
+            if (actor->category == ACTORCAT_PLAYER) {
+                VrBody_NoteWallPushout(actor, sp64.x - actor->world.pos.x, sp64.z - actor->world.pos.z);
+            }
             Math_Vec3f_Copy(&actor->world.pos, &sp64);
             actor->wallYaw = Math_Atan2S(wallPoly->normal.z, wallPoly->normal.x);
             actor->bgCheckFlags |= 8;
@@ -2185,6 +2189,11 @@ s32 Actor_OfferGetItem(Actor* actor, PlayState* play, s32 getItemId, f32 xzRange
             if (vrScoop ? VrBottle_MouthInVolume(actor)
                         : ((actor->xzDistToPlayer < xzRange) && (fabsf(actor->yDistToPlayer) < yRange))) {
                 s16 yawDiff = actor->yawTowardsPlayer - player->actor.shape.rot.y;
+                // SOH [VR] Physical carrying (VrCarry): every carry offer in range is a candidate for
+                // the hand that reaches it, not only the one Link faces most (picked just below).
+                if (getItemId == GI_NONE) {
+                    VrCarry_NoteOffer(actor);
+                }
                 s32 absYawDiff = ABS(yawDiff);
 
                 if ((getItemId != GI_NONE) || (player->getItemDirection < absYawDiff)) {
@@ -2865,12 +2874,19 @@ void Actor_Draw(PlayState* play, Actor* actor) {
         s32 vrMeshMasked = (actor->category == ACTORCAT_ITEMACTION) || (actor->category == ACTORCAT_MISC) ||
                            (actor->category == ACTORCAT_ENEMY) || (actor->category == ACTORCAT_NPC);
         s32 vrMeshFlesh = (actor->category == ACTORCAT_BOSS);
+        // SOH [VR] Physical carrying: an object held in the hand is drawn welded to the live hand
+        // (every Mtx it makes, VrCarry_BeginDrawWeld), and is not world geometry for the blade.
+        s32 vrCarryWeld = VrCarry_BeginDrawWeld(actor);
+        vrMeshMasked = vrMeshMasked || vrCarryWeld;
         if (vrMeshMasked) {
             VrCombat_MeshMaskPush(play->state.gfxCtx);
         } else if (vrMeshFlesh) {
             VrCombat_MeshFleshPush(play->state.gfxCtx);
         }
         actor->draw(actor, play);
+        if (vrCarryWeld) {
+            VrCarry_EndDrawWeld();
+        }
         if (vrMeshMasked) {
             VrCombat_MeshMaskPop(play->state.gfxCtx);
         } else if (vrMeshFlesh) {

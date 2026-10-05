@@ -15,6 +15,7 @@
 #include "soh/framebuffer_effects.h"
 
 #include <vr_interface.h>
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #include <time.h>
 #include <assert.h>
@@ -1338,6 +1339,9 @@ void Play_Draw(PlayState* play) {
     static u32 lastPauseHeight;
     static bool lastAltAssets;
     static bool hasCapturedPauseBuffer;
+    // SOH [VR] The world-space pause menu needs no backdrop, so its capture is skipped; if the menu
+    // falls back to the flat panel mid-pause (toggle off, third person), capture for real.
+    static bool sVrPauseCaptureSkipped = false;
     bool recapturePauseBuffer = false;
 
     // If the size has changed, alt assets toggled, or dropped frames leading to the buffer not being copied,
@@ -1345,13 +1349,25 @@ void Play_Draw(PlayState* play) {
     // This requires not rendering kaleido during this copy to avoid kaleido itself being copied too.
     if ((R_PAUSE_MENU_MODE == 2 || R_PAUSE_MENU_MODE == 3) &&
         (lastPauseWidth != OTRGetGameRenderWidth() || lastPauseHeight != OTRGetGameRenderHeight() ||
-         lastAltAssets != ResourceMgr_IsAltAssetsEnabled() || !hasCapturedPauseBuffer)) {
+         lastAltAssets != ResourceMgr_IsAltAssetsEnabled() || !hasCapturedPauseBuffer ||
+         (sVrPauseCaptureSkipped && !VrPause_WorldSpace()))) {
         R_PAUSE_MENU_MODE = 1;
         recapturePauseBuffer = true;
     }
     // #endregion
 
     OPEN_DISPS(gfxCtx);
+
+    // SOH [VR] The world-space pause menu draws the frozen world every frame, and draws register
+    // colliders (Link's shield and physical blade, some actors). Play_Update checks whatever was
+    // registered since its last clear, so a paused draw's registrations would land on the first
+    // tick after resume (a sword waved while paused could hit on unpause). Vanilla never draws
+    // while paused, so the contract is "a paused frame registers nothing": the engine's own (unused)
+    // SAC mode makes every CollisionCheck_Set* refuse, and the pre-pause lists stay exactly as left.
+    bool vrPauseFreezeCollision = VrPause_WorldSpace() && !(play->colChkCtx.sacFlags & 1);
+    if (vrPauseFreezeCollision) {
+        CollisionCheck_EnableSAC(play, &play->colChkCtx);
+    }
 
     // #region SOH [VR] First-person camera anchor — push Link's head position to the VR layer.
     // The VR view is then composed as (head anchor + HMD offset/orientation); see vr_openxr.cpp.
@@ -1441,14 +1457,18 @@ void Play_Draw(PlayState* play) {
                     f32 vrOffZ = Math_CosS(vrBodyYaw) * vrHeadFwd + Math_SinS(vrBodyYaw) * vrHeadSide;
                     f32 vrOffLenSq = SQ(vrOffX) + SQ(vrOffZ);
                     Vec3f vrCamFrom = vrPlayer->actor.world.pos;
+                    // SOH [VR] Small body collider: the offset is part of the view's place inside
+                    // Link's circle, which VrBody_ClampView bounds below — no sweep at the big radius
+                    // (that collapsed the offset to nothing at every wall).
+                    f32 vrSweepRadius = VrBody_Active() ? 0.0f : vrPlayer->ageProperties->wallCheckRadius;
                     Vec3f vrCamTo = { vrCamFrom.x + vrOffX, vrCamFrom.y, vrCamFrom.z + vrOffZ };
                     Vec3f vrCamRes;
                     CollisionPoly* vrCamPoly;
                     s32 vrCamBgId;
                     f32 vrKeep = 1.0f;
-                    if (BgCheck_EntitySphVsWall3(&play->colCtx, &vrCamRes, &vrCamTo, &vrCamFrom,
-                                                 vrPlayer->ageProperties->wallCheckRadius, &vrCamPoly, &vrCamBgId,
-                                                 &vrPlayer->actor, vrHead.y - vrCamFrom.y)) {
+                    if ((vrSweepRadius > 0.0f) &&
+                        BgCheck_EntitySphVsWall3(&play->colCtx, &vrCamRes, &vrCamTo, &vrCamFrom, vrSweepRadius,
+                                                 &vrCamPoly, &vrCamBgId, &vrPlayer->actor, vrHead.y - vrCamFrom.y)) {
                         vrKeep = ((vrCamRes.x - vrCamFrom.x) * vrOffX + (vrCamRes.z - vrCamFrom.z) * vrOffZ) /
                                  vrOffLenSq;
                         vrKeep = CLAMP(vrKeep, 0.0f, 1.0f);
@@ -1467,7 +1487,15 @@ void Play_Draw(PlayState* play) {
             // the body-move deadzone (0.1, Player_UpdateCommon). The camera never leans away from
             // Link, so it can't pass a wall that stops him.
             VR_SetViewFade(0.0f);
-            VR_ClampRoomscaleLean(0.1f);
+            // While the world-space pause menu is up nothing moves the body, so the stock clamp
+            // would pin the head: VrPause_LeanClamp allows real leaning then (and briefly after,
+            // while the body catches up).
+            // SOH [VR] Small body collider (VrBody, default on): instead of discarding it, the view
+            // keeps what the body couldn't follow, bounded to a small circle inside Link's own
+            // collision circle — closer to walls than his body, never past anything that stops it.
+            if (!VrBody_ClampView(play, vrPlayer, &vrHead.x)) {
+                VR_ClampRoomscaleLean(VrPause_LeanClamp());
+            }
             float vrRsOrigin[2];
             VR_GetRoomscaleOrigin(vrRsOrigin);
             vrHead.x -= vrRsOrigin[0];
@@ -1490,6 +1518,11 @@ void Play_Draw(PlayState* play) {
             sVrFirstPersonWasActive = false;
             VR_SetCameraAnchor(vrCam->eye.x, vrCam->eye.y, vrCam->eye.z);
             VR_SetCameraYaw(vrCam->camDir.y);
+        }
+        // SOH [VR] World-space pause: Camera_Update is frozen with the game, so the cull view would
+        // stay where the head pointed when the menu opened. Rebuild it from the live head.
+        if (VrPause_WorldSpace()) {
+            VrPause_RefreshCullView(play);
         }
     }
     // #endregion
@@ -1609,7 +1642,8 @@ void Play_Draw(PlayState* play) {
             R_PAUSE_MENU_MODE = 0;
         }
 
-        if (R_PAUSE_MENU_MODE == 3) {
+        // SOH [VR] The world-space pause menu keeps drawing the (frozen) world instead of the backdrop.
+        if (R_PAUSE_MENU_MODE == 3 && !VrPause_WorldSpace()) {
             Gfx* gfxP = POLY_OPA_DISP;
 
             // SOH [Port] Draw game framebuffer using our custom handling
@@ -1748,7 +1782,14 @@ void Play_Draw(PlayState* play) {
                 lastAltAssets = ResourceMgr_IsAltAssetsEnabled();
                 hasCapturedPauseBuffer = false;
 
-                FB_CopyToFramebuffer(&gfxP, 0, gPauseFrameBuffer, false, &hasCapturedPauseBuffer);
+                // SOH [VR] No backdrop for the world-space pause menu (and in stereo the overlay list
+                // is the HUD quad's, the wrong place for a frame copy).
+                sVrPauseCaptureSkipped = VrPause_WorldSpace();
+                if (sVrPauseCaptureSkipped) {
+                    hasCapturedPauseBuffer = true;
+                } else {
+                    FB_CopyToFramebuffer(&gfxP, 0, gPauseFrameBuffer, false, &hasCapturedPauseBuffer);
+                }
 
                 // Set the state back to ready after the recapture is done
                 if (recapturePauseBuffer) {
@@ -1770,7 +1811,11 @@ void Play_Draw(PlayState* play) {
 
         // Draw Enhancements that need to be placed in the world. This happens before the PostWorldDraw
         // so that they aren't drawn when the pause menu is up (e.g. collision viewer, actor name tags)
-        GameInteractor_ExecuteOnPlayDrawEnd();
+        // SOH [VR] The world-space pause menu reaches this point with the menu up (the world keeps
+        // drawing); keep the contract above: every hook here assumes the game is not paused.
+        if (!VrPause_WorldSpace()) {
+            GameInteractor_ExecuteOnPlayDrawEnd();
+        }
 
     Play_Draw_DrawOverlayElements:
         if ((HREG(80) != 10) || (HREG(89) != 0)) {
@@ -1796,6 +1841,10 @@ Play_Draw_skip:
     }
 
     Camera_Finish(GET_ACTIVE_CAM(play));
+
+    if (vrPauseFreezeCollision) {
+        CollisionCheck_DisableSAC(play, &play->colChkCtx);
+    }
 
     CLOSE_DISPS(gfxCtx);
 

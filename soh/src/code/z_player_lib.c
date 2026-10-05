@@ -1106,6 +1106,16 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
 
     SkelAnime_DrawFlexLod(play, skeleton, jointTable, dListCount, overrideLimbDraw, postLimbDraw, data, lod);
 
+    // SOH [VR] The gauntlet plates / Goron bracelet / boots below are drawn on the skeleton's limb
+    // matrices AFTER the limb pass, so nulling the forearm / foot display lists in
+    // Player_OverrideLimbDrawGameplayVRFirstPerson does not hide them: they kept rendering on the
+    // animation-driven arms under the invisible body. Mirror that override's conditions here: the
+    // forearms hide under gVrHideBody or gVrMotionHands, the feet under gVrHideBody only.
+    s32 vrFirstPersonBody = (overrideLimbDraw == Player_OverrideLimbDrawGameplayVRFirstPerson);
+    s32 vrArmsHidden =
+        vrFirstPersonBody && (CVarGetInteger("gVrHideBody", 1) || CVarGetInteger("gVrMotionHands", 1));
+    s32 vrFeetHidden = vrFirstPersonBody && CVarGetInteger("gVrHideBody", 1);
+
     if (!GameInteractor_InvisibleLinkActive() &&
         ((CVarGetInteger(CVAR_ENHANCEMENT("FirstPersonGauntlets"), 0) && LINK_IS_ADULT) ||
          (overrideLimbDraw != Player_OverrideLimbDrawGameplayFirstPerson)) &&
@@ -1114,7 +1124,7 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
         if (LINK_IS_ADULT) {
             s32 strengthUpgrade = CUR_UPG_VALUE(UPG_STRENGTH);
 
-            if (strengthUpgrade >= 2) { // silver or gold gauntlets
+            if (strengthUpgrade >= 2 && !vrArmsHidden) { // silver or gold gauntlets; SOH [VR] not on hidden arms
                 gDPPipeSync(POLY_OPA_DISP++);
 
                 color = &sGauntletColors[strengthUpgrade - 2];
@@ -1139,14 +1149,14 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
                                                     : gLinkAdultRightGauntletPlate3DL);
             }
 
-            if (boots != 0) {
+            if (boots != 0 && !vrFeetHidden) { // SOH [VR] no boots on hidden feet
                 Gfx** bootDLists = sBootDListGroups[boots - 1];
 
                 gSPDisplayList(POLY_OPA_DISP++, bootDLists[0]);
                 gSPDisplayList(POLY_OPA_DISP++, bootDLists[1]);
             }
         } else {
-            if (Player_GetStrength() > PLAYER_STR_NONE) {
+            if (Player_GetStrength() > PLAYER_STR_NONE && !vrArmsHidden) { // SOH [VR] bracelet rides the forearm
                 gSPDisplayList(POLY_OPA_DISP++, gLinkChildGoronBraceletDL);
             }
         }
@@ -1526,6 +1536,19 @@ static s32 sVrHandLimbFrame[2] = { -1, -1 };
 // (the Mtx about to be emitted) was computed from `curMf16` (MtxF layout) this frame, against
 // this frame's snapshot of `vrHand`. False = no snapshot this frame; the caller's plain matrix
 // stands, exactly as before.
+s32 Player_VrWeldMtxToHand(PlayState* play, const void* mtx, s32 vrHand, const float* curMf16);
+
+// SOH [VR] Physical carrying: the hand every Mtx made by Matrix_ToMtx is welded to while a held object
+// draws (VrCarry_BeginDrawWeld / EndDrawWeld around its actor draw); -1 = none.
+extern PlayState* gPlayState;
+int32_t gVrMtxWeldHand = -1;
+
+void Player_VrWeldCurrentMtx(const void* mtx, const float* curMf16) {
+    if ((gVrMtxWeldHand >= 0) && (gPlayState != NULL)) {
+        Player_VrWeldMtxToHand(gPlayState, mtx, gVrMtxWeldHand, curMf16);
+    }
+}
+
 s32 Player_VrWeldMtxToHand(PlayState* play, const void* mtx, s32 vrHand, const float* curMf16) {
     MtxF vrInv;
     MtxF vrLocal;
@@ -1586,7 +1609,9 @@ s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex,
             *dList = NULL;
             return ret;
         }
-        if (limbIndex == PLAYER_LIMB_L_HAND || limbIndex == PLAYER_LIMB_R_HAND) {
+        // SOH [VR] Lifting a gauntlet pillar: the hands are Link's animated hands (on the pillar), so the
+        // pillar's pose and its throw are the base game's (Player_VrPillarLift).
+        if ((limbIndex == PLAYER_LIMB_L_HAND || limbIndex == PLAYER_LIMB_R_HAND) && !Player_VrPillarLift(this)) {
             // R_HAND rides the off hand, except while it holds the hookshot, which goes to the
             // dominant hand (VrHookshot_RightLimbHand swaps the limbs); L_HAND takes the other.
             s32 rightLimbVr = VrHookshot_RightLimbHand(this);
@@ -1615,12 +1640,28 @@ s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex,
                 // string hand -> arrow rest line (VrArchery). It is then welded to the live hand
                 // as a CHILD (hand-local part vs. the raw pose) instead of being replaced by it.
                 MtxF vrRawHandMtx = handMtx;
-                s32 vrBowAligned = VrArchery_BowAlignedMatrix(vrHand, &handMtx.mf[0][0]);
+                // SOH [VR] Hands on a block (VrBlock): while attached by hand, the hand rides the
+                // block's face — drawn at the game rate with the block (normal frame interpolation),
+                // never substituted with the live controller.
+                // A hand latched on a silver boulder rides it the same way (VrCarry).
+                s32 vrPinned = VrBlock_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]) ||
+                               VrCarry_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]);
+                s32 vrBowAligned = !vrPinned && VrArchery_BowAlignedMatrix(vrHand, &handMtx.mf[0][0]);
+                // SOH [VR] Climbing (VrClimb): a holding hand is drawn on the surface where it took
+                // hold — a fixed offset from the controller, still live (welded as a child below).
+                f32 vrClimbSnap[3];
+                s32 vrClimbSnapped =
+                    !vrPinned && !vrBowAligned && VrClimb_HandSnapOffset(this, vrHand, vrClimbSnap);
+                if (vrClimbSnapped) {
+                    handMtx.mf[3][0] += vrClimbSnap[0];
+                    handMtx.mf[3][1] += vrClimbSnap[1];
+                    handMtx.mf[3][2] += vrClimbSnap[2];
+                }
                 Matrix_Put(&handMtx);
                 // Tag this limb's per-frame Mtx so the interpreter swaps in the LIVE controller pose
                 // per eye — the hand tracks at headset rate instead of the game-rate interpolation.
-                if (play->flexLimbOverrideMTX != NULL) {
-                    if (vrBowAligned) {
+                if (play->flexLimbOverrideMTX != NULL && !vrPinned) {
+                    if (vrBowAligned || vrClimbSnapped) {
                         MtxF vrInv;
                         MtxF vrLocal;
                         SkinMatrix_Invert(&vrRawHandMtx, &vrInv);
@@ -1633,8 +1674,11 @@ s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex,
                 }
                 // Snapshot the 20 Hz pose this frame's derived matrices (bowstring) are built
                 // against, so their hand-LOCAL part can be extracted for live re-composition.
-                sVrHandLimbMtxF[vrHand] = vrRawHandMtx;
-                sVrHandLimbFrame[vrHand] = (s32)play->state.frames;
+                // (Not for a pinned hand: nothing may weld to the live controller through it.)
+                if (!vrPinned) {
+                    sVrHandLimbMtxF[vrHand] = vrRawHandMtx;
+                    sVrHandLimbFrame[vrHand] = (s32)play->state.frames;
+                }
                 pos->x = pos->y = pos->z = 0.0f;
                 rot->x = rot->y = rot->z = 0;
                 if (mirror) {
@@ -2361,6 +2405,8 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
                     // SOH [VR] Physical carry uses one controller, not the midpoint of
                     // Link's animation-driven hands. Keep this after vanilla placement.
                     VrItemThrow_UpdateCarryPose(this);
+                    // SOH [VR] Physically carried pots / rocks / bushes / cuccos...: held as grabbed.
+                    VrCarry_UpdateCarryPose(this);
                 }
             }
         }
@@ -2624,18 +2670,13 @@ void Player_DrawPauseImpl(PlayState* play, void* gameplayKeep, void* linkObject,
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
-void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale, s32 sword,
-                      s32 tunic, s32 shield, s32 boots) {
-    Input* p1Input = &play->state.input[0];
-    Vec3f eye = { 0.0f, 0.0f, -400.0f };
-    Vec3f at = { 0.0f, 0.0f, 0.0f };
+// Poses the pause skeleton for this frame: the animated pause Link (advances its animation), or the
+// static pause joint table for the current age / sword / shield. sword/shield may be cleared (the
+// Triforce pose holds neither); at is the pause camera's look-at, raised for the animated child.
+static void Player_PosePauseSkeleton(PlayState* play, SkelAnime* skelAnime, s32* sword, s32* shield, Vec3f* at) {
     Vec3s* destTable;
     Vec3s* srcTable;
     s32 i;
-    bool canswitchrnd = false;
-
-    gSegments[4] = VIRTUAL_TO_PHYSICAL(segment + 0x3800);
-    gSegments[6] = VIRTUAL_TO_PHYSICAL(segment + 0x8800);
 
     uintptr_t* PauseMenuAnimSet[4] = { // IDLE                       // Two Handed                       // No shield //
                                        // Kid Hylian Shield
@@ -2663,8 +2704,8 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
             anim = PauseMenuAnimSet[EquipedStance];
         } else {
             anim = gPlayerAnim_link_magic_kaze2;
-            sword = 0;
-            shield = 0;
+            *sword = 0;
+            *shield = 0;
         }
 
         if (skelAnime->animation != anim) {
@@ -2675,20 +2716,20 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
 
         if (!LINK_IS_ADULT) {
             // Link is placed too far up by default when animating
-            at.y += 60;
+            at->y += 60;
         }
     } else {
 
         if (!LINK_IS_ADULT) {
-            if (shield == PLAYER_SHIELD_DEKU) {
+            if (*shield == PLAYER_SHIELD_DEKU) {
                 srcTable = gLinkPauseChildDekuShieldJointTable;
             } else {
                 srcTable = gLinkPauseChildJointTable;
             }
         } else {
-            if (sword == PLAYER_SWORD_BIGGORON) {
+            if (*sword == PLAYER_SWORD_BIGGORON) {
                 srcTable = gLinkPauseAdultBgsJointTable;
-            } else if (shield != PLAYER_SHIELD_NONE) {
+            } else if (*shield != PLAYER_SHIELD_NONE) {
                 srcTable = gLinkPauseAdultShieldJointTable;
             } else {
                 srcTable = gLinkPauseAdultJointTable;
@@ -2703,9 +2744,172 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
         }
         free(ogSrcTable);
     }
+}
+
+void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale, s32 sword,
+                      s32 tunic, s32 shield, s32 boots) {
+    Vec3f eye = { 0.0f, 0.0f, -400.0f };
+    Vec3f at = { 0.0f, 0.0f, 0.0f };
+
+    gSegments[4] = VIRTUAL_TO_PHYSICAL(segment + 0x3800);
+    gSegments[6] = VIRTUAL_TO_PHYSICAL(segment + 0x8800);
+
+    Player_PosePauseSkeleton(play, skelAnime, &sword, &shield, &at);
 
     Player_DrawPauseImpl(play, segment + 0x3800, segment + 0x8800, skelAnime, pos, rot, scale, sword, tunic, shield,
                          boots, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT, &eye, &at, 60.0f,
                          play->state.gfxCtx->curFrameBuffer,
                          play->state.gfxCtx->curFrameBuffer + (PAUSE_EQUIP_PLAYER_WIDTH * PAUSE_EQUIP_PLAYER_HEIGHT));
+}
+
+// Placement of the pause camera's framing on the equipment page (current matrix = the page's):
+// the image rectangle's bottom center, the size multiplier about it, the camera-view-to-page turn,
+// and the camera's view axis at Link's depth onto the rectangle's center.
+static void Player_ApplyPauseInWorldPlacement(f32 rectCenterX, f32 rectCenterY, f32 rectHeight, f32 sizeMul,
+                                              f32 standOut, f32 k, f32 axisY, f32 depthZ) {
+    Matrix_Translate(rectCenterX, rectCenterY - (rectHeight * 0.5f), standOut, MTXMODE_APPLY);
+    Matrix_Scale(sizeMul, sizeMul, sizeMul, MTXMODE_APPLY);
+    Matrix_Translate(0.0f, rectHeight * 0.5f, 0.0f, MTXMODE_APPLY);
+    Matrix_Scale(k, k, k, MTXMODE_APPLY);
+    Matrix_RotateY(M_PI, MTXMODE_APPLY);
+    Matrix_Translate(0.0f, -axisY, -depthZ, MTXMODE_APPLY);
+}
+
+// SOH [VR] The world-space pause menu's equipment Link: the same posed skeleton and Player_DrawImpl
+// call as Player_DrawPause, drawn into the world on the page instead of through the pause camera into
+// a 64x112 offscreen image. The current matrix must be the equipment page's (the menu draws its pages
+// with world-space modelviews, VrPause.cpp). The pause camera's framing is mapped onto the image
+// rectangle exactly: the camera looks down +Z from (0, 0, -400) at Link's depth d = pos.z + 400 with a
+// 60 degree fovy, so the rectangle's height spans 2 d tan(30) render units there; RotateY(180) turns
+// the camera's view (screen right = -X, toward the camera = -Z) into the page's (+X right, +Z toward
+// the viewer). sizeMul scales about the rectangle's bottom (his feet stay put); standOut lifts him off
+// the page so he stands in front of it. Before him, the eye's depth is cleared (a full-screen Z fill,
+// honored mid-list by the stereo interpreter): the pages draw without Z, so this way he is occluded
+// only by himself, never by a wall nearer than the page. The pause light is carried into world space
+// with the placement, so he is lit as in the menu whichever way the player faced when pausing.
+void Player_DrawPauseInWorld(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale,
+                             s32 sword, s32 tunic, s32 shield, s32 boots, f32 rectCenterX, f32 rectCenterY,
+                             f32 rectHeight, f32 sizeMul, f32 standOut) {
+    static Vec3f sLightDirRender = { 84.0f, 84.0f, -84.0f }; // Player_DrawPauseImpl's lights1 direction
+    static Vec3f sHiliteDirRender = { 89.8f, 0.0f, 89.8f };  // Player_DrawPauseImpl's hilite direction
+    static Vec3f sZero = { 0.0f, 0.0f, 0.0f };
+    GraphicsContext* gfxCtx = play->state.gfxCtx;
+    Vec3f eye = { 0.0f, 0.0f, -400.0f };
+    Vec3f at = { 0.0f, 0.0f, 0.0f };
+    u8 mirrorWorldActive = CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0);
+    u8 animatedAdult =
+        CVarGetInteger(CVAR_ENHANCEMENT("PauseMenuAnimatedLink"), 0) && LINK_AGE_IN_YEARS == YEARS_ADULT;
+    u8 triforce = CVarGetInteger(CVAR_GENERAL("PauseMenuAnimatedLinkTriforce"), 0);
+    u8 playerSwordAndShield[2];
+    Vec3f linkRender;
+    Vec3f worldOrigin;
+    Vec3f worldLink;
+    Vec3f worldTip;
+    Vec3f worldLight;
+    Vec3f worldHilite;
+    Lights1* lights;
+    f32 depth;
+    f32 k;
+    f32 axisY;
+    f32 len;
+
+    gSegments[4] = VIRTUAL_TO_PHYSICAL(segment + 0x3800);
+    gSegments[6] = VIRTUAL_TO_PHYSICAL(segment + 0x8800);
+
+    Player_PosePauseSkeleton(play, skelAnime, &sword, &shield, &at);
+
+    depth = pos->z - eye.z;
+    k = rectHeight / (2.0f * depth * tanf(DEG_TO_RAD(60.0f) * 0.5f));
+    axisY = at.y * depth / -eye.z;
+    linkRender.x = pos->x - (animatedAdult ? 25 : 0);
+    linkRender.y = pos->y - (triforce ? 16 : 0);
+    linkRender.z = pos->z;
+
+    Matrix_Push();
+    Player_ApplyPauseInWorldPlacement(rectCenterX, rectCenterY, rectHeight, sizeMul, standOut, k, axisY, pos->z);
+
+    // Render-space directions into world space through the placement (its translation cancels).
+    Matrix_MultVec3f(&sZero, &worldOrigin);
+    Matrix_MultVec3f(&linkRender, &worldLink);
+    Matrix_MultVec3f(&sLightDirRender, &worldTip);
+    worldLight.x = worldTip.x - worldOrigin.x;
+    worldLight.y = worldTip.y - worldOrigin.y;
+    worldLight.z = worldTip.z - worldOrigin.z;
+    len = sqrtf(SQ(worldLight.x) + SQ(worldLight.y) + SQ(worldLight.z));
+    if (len > 0.0f) {
+        worldLight.x *= 120.0f / len;
+        worldLight.y *= 120.0f / len;
+        worldLight.z *= 120.0f / len;
+    }
+    Matrix_MultVec3f(&sHiliteDirRender, &worldTip);
+    worldHilite.x = worldTip.x - worldOrigin.x;
+    worldHilite.y = worldTip.y - worldOrigin.y;
+    worldHilite.z = worldTip.z - worldOrigin.z;
+
+    lights = Graph_Alloc(gfxCtx, sizeof(Lights1));
+    *lights = (Lights1)gdSPDefLights1(80, 80, 80, 255, 255, 255, (s8)worldLight.x, (s8)worldLight.y,
+                                      (s8)worldLight.z);
+
+    OPEN_DISPS(gfxCtx);
+
+    // Depth reset for this eye (see above), then back to the frame's color image.
+    gDPPipeSync(POLY_OPA_DISP++);
+    gDPSetColorImage(POLY_OPA_DISP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, SCREEN_WIDTH, gZBuffer);
+    gDPSetCycleType(POLY_OPA_DISP++, G_CYC_FILL);
+    gDPSetRenderMode(POLY_OPA_DISP++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(POLY_OPA_DISP++, (GPACK_ZDZ(G_MAXFBZ, 0) << 16) | GPACK_ZDZ(G_MAXFBZ, 0));
+    gDPFillRectangle(POLY_OPA_DISP++, 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+    gDPPipeSync(POLY_OPA_DISP++);
+    gDPSetColorImage(POLY_OPA_DISP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, SCREEN_WIDTH, gfxCtx->curFrameBuffer);
+
+    if (mirrorWorldActive) {
+        gSPSetExtraGeometryMode(POLY_OPA_DISP++, G_EX_INVERT_CULLING);
+        gSPSetExtraGeometryMode(POLY_XLU_DISP++, G_EX_INVERT_CULLING);
+    }
+
+    playerSwordAndShield[0] = sword;
+    playerSwordAndShield[1] = shield;
+
+    Matrix_Translate(linkRender.x, linkRender.y, linkRender.z, MTXMODE_APPLY);
+    Matrix_RotateZYX(rot->x, rot->y, rot->z, MTXMODE_APPLY);
+    Matrix_Scale(scale * (mirrorWorldActive ? -1 : 1), scale, scale, MTXMODE_APPLY);
+
+    gSPSegment(POLY_OPA_DISP++, 0x04, segment + 0x3800);
+    gSPSegment(POLY_OPA_DISP++, 0x06, segment + 0x8800);
+
+    gSPSetLights1(POLY_OPA_DISP++, (*lights));
+
+    func_80093C80(play);
+
+    POLY_OPA_DISP = Gfx_SetFog2(POLY_OPA_DISP, 0, 0, 0, 0, 997, 1000);
+
+    func_8002EABC(&worldLink, &play->view.eye, &worldHilite, gfxCtx);
+
+    gSPSegment(POLY_OPA_DISP++, 0x0C, gCullBackDList);
+
+    Player_DrawImpl(play, skelAnime->skeleton, skelAnime->jointTable, skelAnime->dListCount, 0, tunic, boots, 0,
+                    Player_OverrideLimbDrawPause, NULL, &playerSwordAndShield);
+
+    Matrix_Pop();
+
+    if (triforce) {
+        Matrix_Push();
+        Player_ApplyPauseInWorldPlacement(rectCenterX, rectCenterY, rectHeight, sizeMul, standOut, k, axisY, pos->z);
+        Matrix_Translate(pos->x - (LINK_AGE_IN_YEARS == YEARS_ADULT ? 25 : 0),
+                         pos->y + 280 + (LINK_AGE_IN_YEARS == YEARS_ADULT ? 48 : 0), pos->z, MTXMODE_APPLY);
+        Matrix_RotateZYX(rot->x, rot->y, rot->z, MTXMODE_APPLY);
+        Matrix_Scale(scale * (mirrorWorldActive ? -1 : 1), scale, scale, MTXMODE_APPLY);
+        Pause_DrawTriforceSpot(play, 1);
+        Matrix_Pop();
+    }
+
+    if (mirrorWorldActive) {
+        gSPClearExtraGeometryMode(POLY_OPA_DISP++, G_EX_INVERT_CULLING);
+        gSPClearExtraGeometryMode(POLY_XLU_DISP++, G_EX_INVERT_CULLING);
+    }
+
+    // Link loaded his own modelviews; the rest of the page draws under the page matrix again.
+    gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+
+    CLOSE_DISPS(gfxCtx);
 }

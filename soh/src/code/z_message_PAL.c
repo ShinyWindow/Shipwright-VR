@@ -14,6 +14,7 @@
 #include "soh/OTRGlobals.h"
 #include "soh/SaveManager.h"
 #include "soh/ResourceManagerHelpers.h"
+#include <vr_interface.h> // SOH [VR] text panel
 #include "soh/Enhancements/savestate_serialize.h"
 
 // #region SOH [NTSC] - Allows custom messages to work on japanese
@@ -4346,10 +4347,56 @@ void Message_DrawDebugText(PlayState* play, Gfx** p) {
     GfxPrint_Destroy(&printer);
 }
 
+// SOH [VR] Text panel routing. In VR the message system's list (text box, text, icons, ocarina
+// staff) goes to its own soft-follow quad instead of the HUD quad. Message_Draw always branches the
+// overlay into the list as vanilla does and records that branch plus a self-contained root for the
+// panel; graph.c, which decides per frame whether this is a flat-screen context, then either leaves
+// the overlay branch alone (flat: text stays in the panel's frame) or turns it into a no-op and
+// hands the root to the VR layer (Message_VrRouteText). The decision lives in one place, so the text
+// can never be drawn twice or lost.
+static Gfx* sVrTextOverlayCall = NULL; // the overlay's gSPDisplayList into this tick's text list
+static Gfx* sVrTextRoot = NULL;        // prelude + call: renders the text list on its own
+static s32 sVrTextShowing = false;     // a text box (or the staff) is actually on screen
+static f32 sVrTextCrop[4];             // u0, v0, u1, v1 of the 320x240 frame the panel shows
+
+void Message_VrRouteText(s32 toPanel) {
+    if (toPanel && sVrTextOverlayCall != NULL) {
+        gDPNoOp(sVrTextOverlayCall);
+        VR_SetTextDisplayList(sVrTextShowing ? sVrTextRoot : NULL, sVrTextCrop[0], sVrTextCrop[1], sVrTextCrop[2],
+                              sVrTextCrop[3]);
+    } else {
+        VR_SetTextDisplayList(NULL, 0.0f, 0.0f, 1.0f, 1.0f);
+    }
+    sVrTextOverlayCall = NULL;
+    sVrTextRoot = NULL;
+}
+
+// The panel shows the text box, not the whole screen: its target rect (the opening animation grows
+// inside it) with a small margin, widened to the staff while the ocarina is out. Vanilla picks
+// upper/middle/lower boxes from screen positions; on the panel they all land in the same place.
+static void Message_VrComputeTextCrop(MessageContext* msgCtx) {
+    s32 y0 = R_TEXTBOX_Y_TARGET - 6;
+    s32 y1 = R_TEXTBOX_Y_TARGET + 64 + 6;
+
+    if (msgCtx->msgMode >= MSGMODE_OCARINA_STARTING && msgCtx->msgMode <= MSGMODE_FROGS_WAITING) {
+        // Treble clef 166..198, note icons 169..205 (R_OCARINA_NOTES_YPOS + 16).
+        y0 = MIN(y0, 158);
+        y1 = MAX(y1, 212);
+    }
+    y0 = CLAMP(y0, 0, SCREEN_HEIGHT);
+    y1 = CLAMP(y1, 0, SCREEN_HEIGHT);
+
+    sVrTextCrop[0] = 24.0f / SCREEN_WIDTH; // the box spans x 34..290
+    sVrTextCrop[1] = (f32)y0 / SCREEN_HEIGHT;
+    sVrTextCrop[2] = 296.0f / SCREEN_WIDTH;
+    sVrTextCrop[3] = (f32)y1 / SCREEN_HEIGHT;
+}
+
 void Message_Draw(PlayState* play) {
     Gfx* plusOne;
     Gfx* polyOpaP;
     s16 watchVar;
+    Gfx* vrTextList; // SOH [VR]
 
     OPEN_DISPS(play->state.gfxCtx);
 
@@ -4364,11 +4411,49 @@ void Message_Draw(PlayState* play) {
         POLY_OPA_DISP = plusOne;
     }
     plusOne = Graph_GfxPlusOne(polyOpaP = POLY_OPA_DISP);
+    vrTextList = plusOne;
+    sVrTextOverlayCall = NULL;
     if (!GameInteractor_NoUIActive()) {
+        if (VR_IsInitialized()) { // SOH [VR] remember the branch; graph.c may reroute it
+            sVrTextOverlayCall = OVERLAY_DISP;
+        }
         gSPDisplayList(OVERLAY_DISP++, plusOne);
     }
     Message_DrawMain(play, &plusOne);
     gSPEndDisplayList(plusOne++);
+    // SOH [VR] Self-contained root for the text panel, inside the same skipped POLY_OPA detour. The
+    // list itself sets its own segments 02/07 and render modes and draws only texture rectangles;
+    // what it inherits from the overlay at the branch point is the frame setup: segments 00/04/05,
+    // the full-screen scissor and the colour/depth images. Re-establish exactly those.
+    if (sVrTextOverlayCall != NULL) {
+        sVrTextRoot = plusOne;
+        sVrTextShowing = play->msgCtx.msgLength != 0; // everything Message_DrawMain draws is behind this
+        Message_VrComputeTextCrop(&play->msgCtx);
+        gSPSegment(plusOne++, 0x00, NULL);
+        gSPSegment(plusOne++, 0x04, play->objectCtx.status[play->objectCtx.mainKeepIndex].segment);
+        gSPSegment(plusOne++, 0x05, play->objectCtx.status[play->objectCtx.subKeepIndex].segment);
+        gDPPipeSync(plusOne++);
+        gDPSetScissor(plusOne++, G_SC_NON_INTERLACE, 0, 0, gScreenWidth, gScreenHeight);
+        gDPSetColorImage(plusOne++, G_IM_FMT_RGBA, G_IM_SIZ_16b, gScreenWidth, play->state.gfxCtx->curFrameBuffer);
+        gDPSetDepthImage(plusOne++, gZBuffer);
+        // The "no box" message types draw bare text, which on a panel floating over the world can be
+        // unreadable: give them the black box's translucent backing (same rect, same alpha 170),
+        // for the same span of message modes vanilla draws a box in.
+        if (sVrTextShowing && play->msgCtx.textBoxType >= TEXTBOX_TYPE_NONE_BOTTOM &&
+            play->msgCtx.msgMode >= MSGMODE_TEXT_BOX_GROWING && play->msgCtx.msgMode < MSGMODE_TEXT_CLOSING) {
+            Gfx_SetupDL_39Ptr(&plusOne);
+            gDPSetCombineMode(plusOne++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+            gDPSetRenderMode(plusOne++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+            gDPSetPrimColor(plusOne++, 0, 0, 0, 0, 0, 170);
+            gDPFillRectangle(plusOne++, R_TEXTBOX_X_TARGET, R_TEXTBOX_Y_TARGET, R_TEXTBOX_X_TARGET + 256,
+                             R_TEXTBOX_Y_TARGET + 64);
+            gDPPipeSync(plusOne++);
+        }
+        gSPDisplayList(plusOne++, vrTextList);
+        gDPPipeSync(plusOne++);
+        gDPFullSync(plusOne++);
+        gSPEndDisplayList(plusOne++);
+    }
     Graph_BranchDlist(polyOpaP, plusOne);
     POLY_OPA_DISP = plusOne;
     CLOSE_DISPS(play->state.gfxCtx);
