@@ -5,6 +5,7 @@
 #include "assets/objects/gameplay_keep/gameplay_keep.h"
 #include "soh_assets.h"
 #include "soh/cvar_prefixes.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR] world-space boot logo
 
 extern "C" {
 #include "z64.h"
@@ -50,7 +51,8 @@ extern "C" void CustomLogoTitle_Draw(TitleContext* titleContext, uint8_t logoToD
     gSPSetLights1(POLY_OPA_DISP++, sTitleLights);
     Title_SetupView(titleContext, 0, 150.0, 300.0);
     Gfx_SetupDL_25Opa(titleContext->state.gfxCtx);
-    Matrix_Translate(-53.0, -5.0, 0, MTXMODE_NEW);
+    // SOH [VR] vanilla: Matrix_Translate(-53.0, -5.0, 0, MTXMODE_NEW) (VrLogo.cpp)
+    VrLogo_ModelTranslate(-53.0, -5.0, 0);
     Matrix_Scale(1.0, 1.0, 1.0, MTXMODE_APPLY);
     Matrix_RotateZYX(0, sTitleRotY, 0, MTXMODE_APPLY);
 
@@ -137,6 +139,10 @@ extern "C" void CustomLogoTitle_Main(TitleContext* titleContext) {
     if (CVAR_BOOTSEQUENCE_VALUE == BOOTSEQUENCE_AUTHENTIC) {
         logoToDraw = LOGO_TO_DRAW_N64;
     }
+
+    // SOH [VR] World-space logo: camera anchor and the text strip's world panel (VrLogo.cpp).
+    // This replaces Title_Main, so the hook lives here.
+    VrLogo_BeginFrame();
 
     OPEN_DISPS(titleContext->state.gfxCtx);
 

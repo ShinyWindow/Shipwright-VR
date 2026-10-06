@@ -453,9 +453,22 @@ extern "C" void VrBoomerang_Draw(void) {
     FrameInterpolation_RecordOpenChild(key, 0);
     Matrix_SetTranslateRotateYXZ(position[0], position[1], position[2], &rot);
     Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+    MtxF cur;
+    Matrix_Get(&cur);
+    Mtx* mtx = MATRIX_NEWMTX(gPlayState->state.gfxCtx);
+    MtxF hand;
+    if (sState == State::Held && VR_GetHandMatrix(sCarryHand, hand.mf)) {
+        // Welded to the live controller (the held lens's recipe): the hand-LOCAL part against this
+        // tick's hand, re-composed per eye with the rendered hand.
+        MtxF inv;
+        MtxF local;
+        SkinMatrix_Invert(&hand, &inv);
+        SkinMatrix_MtxFMtxFMult(&inv, &cur, &local);
+        VR_RegisterHandChildMatrix(mtx, sCarryHand, &local.mf[0][0]);
+    }
     POLY_OPA_DISP = Play_SetFog(gPlayState, POLY_OPA_DISP);
     Gfx_SetupDL_25Opa(gPlayState->state.gfxCtx);
-    gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(gPlayState->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPMatrix(POLY_OPA_DISP++, mtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
     gSPDisplayList(POLY_OPA_DISP++, (Gfx*)gBoomerangRefDL);
     FrameInterpolation_RecordCloseChild();
     CLOSE_DISPS(gPlayState->state.gfxCtx);

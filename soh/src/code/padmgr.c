@@ -363,12 +363,13 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
             // Z-target to the sword-hand grip, the shield stays on the off-hand grip, A and B
             // on the face buttons. Start is bound on BOTH the left stick click and the left menu
             // button, because whichever stick click the selector is set to is eaten by it.
-            // Keep in sync with sVrInputDefsSelector in SohMenuVRSettings.cpp.
+            // Keep in sync with sVrInputDefsSelector in SohMenuVRSettings.cpp. The triggers have
+            // no CVar (NULL): VrItemSelect_TriggerConsumed always takes them in this set.
             static const char* sVrBindSelCvars[2][6] = {
-                { "gVrBindSelLTrigger", "gVrBindSelLGrip", "gVrBindSelLPrimary", "gVrBindSelLSecondary",
-                  "gVrBindSelLStickClick", "gVrBindSelLMenu" },
-                { "gVrBindSelRTrigger", "gVrBindSelRGrip", "gVrBindSelRPrimary", "gVrBindSelRSecondary",
-                  "gVrBindSelRStickClick", "gVrBindSelRMenu" },
+                { NULL, "gVrBindSelLGrip", "gVrBindSelLPrimary", "gVrBindSelLSecondary", "gVrBindSelLStickClick",
+                  "gVrBindSelLMenu" },
+                { NULL, "gVrBindSelRGrip", "gVrBindSelRPrimary", "gVrBindSelRSecondary", "gVrBindSelRStickClick",
+                  "gVrBindSelRMenu" },
             };
             static const s32 sVrBindSelDefaults[2][6] = {
                 { 0, BTN_R, 0, 0, BTN_START, BTN_START },
@@ -379,12 +380,12 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
             // selector mode the C notes had NOTHING to live on, which made the ocarina unplayable.
             // While VrOcarina_InPlay() this set replaces the gameplay bindings outright and every
             // selector reservation stands down (both triggers, the selector click, the held-item
-            // trigger mirror — see VrItemSelect.cpp), so notes may sit anywhere. Defaults, notes
-            // low to high: D4 (A) = R trigger, F4 (C-down) = L trigger, A4 (C-right) = A,
-            // B4 (C-left) = X, D5 (C-up) = Y; sharpen (R) = right grip, flatten (Z) = left grip;
-            // B (put the ocarina away) = B button. Pitch bend rides the left thumbstick, which is
-            // already the N64 analog stick below. Keep in sync with sVrInputDefsOcarina in
-            // SohMenuVRSettings.cpp.
+            // trigger mirror — see VrItemSelect.cpp), so notes may sit anywhere. Defaults (the
+            // user's headset layout): D4 (A) = A button, the four C notes on the RIGHT stick
+            // directions (sVrBindOcaStickDefaults below); sharpen (R) = right grip, flatten (Z) =
+            // left grip; B (put the ocarina away) = B button; triggers, X and Y unbound. Pitch
+            // bend rides the left thumbstick, which is already the N64 analog stick below. Keep in
+            // sync with sVrInputDefsOcarina in SohMenuVRSettings.cpp.
             static const char* sVrBindOcaCvars[2][6] = {
                 { "gVrBindOcaLTrigger", "gVrBindOcaLGrip", "gVrBindOcaLPrimary", "gVrBindOcaLSecondary",
                   "gVrBindOcaLStickClick", "gVrBindOcaLMenu" },
@@ -392,13 +393,14 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
                   "gVrBindOcaRStickClick", "gVrBindOcaRMenu" },
             };
             static const s32 sVrBindOcaDefaults[2][6] = {
-                { BTN_CDOWN, BTN_Z, BTN_CLEFT, BTN_CUP, 0, 0 },
-                { BTN_A, BTN_R, BTN_CRIGHT, BTN_B, 0, 0 },
+                { 0, BTN_Z, 0, 0, 0, 0 },
+                { 0, BTN_R, BTN_A, BTN_B, 0, 0 },
             };
             // OCARINA stick directions: in this set ONLY, the four cardinal deflections of each
             // thumbstick are bindable inputs too (gameplay sticks keep their stock jobs: move and
             // turn). Dominant-axis with the same 0.5 threshold as the stock C-stick mapping, so a
-            // diagonal flick plays one note, not two. All unbound by default. A hand with any
+            // diagonal flick plays one note, not two. Default: the right stick carries the four C
+            // notes (up = C-up, down = C-down, left = C-left, right = C-right). A hand with any
             // direction bound claims that stick outright — vrOcaStickClaimed above — standing
             // down its stock ocarina job (left: pitch bend / analog stick; right: third-person
             // C-stick). Order: up, down, left, right. Keep in sync with sVrInputDefsOcarina in
@@ -406,6 +408,10 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
             static const char* sVrBindOcaStickCvars[2][4] = {
                 { "gVrBindOcaLStickUp", "gVrBindOcaLStickDown", "gVrBindOcaLStickLeft", "gVrBindOcaLStickRight" },
                 { "gVrBindOcaRStickUp", "gVrBindOcaRStickDown", "gVrBindOcaRStickLeft", "gVrBindOcaRStickRight" },
+            };
+            static const s32 sVrBindOcaStickDefaults[2][4] = {
+                { 0, 0, 0, 0 },
+                { BTN_CUP, BTN_CDOWN, BTN_CLEFT, BTN_CRIGHT },
             };
             static const u16 sVrBtnMasks[6] = { VR_BTN_TRIGGER,   VR_BTN_GRIP,       VR_BTN_PRIMARY,
                                                 VR_BTN_SECONDARY, VR_BTN_THUMBCLICK, VR_BTN_MENU };
@@ -454,8 +460,10 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
                     if (vrState & sVrBtnMasks[vrBtnIdx]) {
                         s32 mapped = vrOcarina      ? CVarGetInteger(sVrBindOcaCvars[vrHandIdx][vrBtnIdx],
                                                                      sVrBindOcaDefaults[vrHandIdx][vrBtnIdx])
-                                     : vrSelProfile ? CVarGetInteger(sVrBindSelCvars[vrHandIdx][vrBtnIdx],
-                                                                     sVrBindSelDefaults[vrHandIdx][vrBtnIdx])
+                                     : vrSelProfile ? (sVrBindSelCvars[vrHandIdx][vrBtnIdx] == NULL
+                                                           ? 0
+                                                           : CVarGetInteger(sVrBindSelCvars[vrHandIdx][vrBtnIdx],
+                                                                            sVrBindSelDefaults[vrHandIdx][vrBtnIdx]))
                                                     : CVarGetInteger(sVrBindCvars[vrHandIdx][vrBtnIdx],
                                                                      sVrBindDefaults[vrHandIdx][vrBtnIdx]);
                         // Mask to the real pad bits (drops the PC-only modifier bits if selected).
@@ -490,7 +498,8 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
                     s32 vrHeldDir = -1;
                     float vrSx = 0.0f, vrSy = 0.0f;
                     for (vrDirIdx = 0; vrDirIdx < 4; vrDirIdx++) {
-                        if (CVarGetInteger(sVrBindOcaStickCvars[vrHandIdx][vrDirIdx], 0) != 0) {
+                        if (CVarGetInteger(sVrBindOcaStickCvars[vrHandIdx][vrDirIdx],
+                                           sVrBindOcaStickDefaults[vrHandIdx][vrDirIdx]) != 0) {
                             vrOcaStickClaimed[vrHandIdx] = 1;
                         }
                     }
@@ -504,7 +513,8 @@ void PadMgr_HandleRetraceMsg(PadMgr* padMgr) {
                         vrHeldDir = (vrSx < -0.5f) ? 2 : (vrSx > 0.5f) ? 3 : -1;
                     }
                     if (vrHeldDir >= 0) {
-                        s32 mapped = CVarGetInteger(sVrBindOcaStickCvars[vrHandIdx][vrHeldDir], 0);
+                        s32 mapped = CVarGetInteger(sVrBindOcaStickCvars[vrHandIdx][vrHeldDir],
+                                                    sVrBindOcaStickDefaults[vrHandIdx][vrHeldDir]);
                         // Mask to the real pad bits (drops the PC-only modifier bits if selected).
                         vrPad->button |= (u16)(mapped & 0xFFFF);
                     }

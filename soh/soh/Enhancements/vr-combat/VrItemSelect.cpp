@@ -64,10 +64,13 @@ enum SelSector { SEC_CENTER = 0, SEC_UP, SEC_DOWN, SEC_LEFT, SEC_RIGHT };
 bool sOpen = false;
 int sHand = VR_HAND_RIGHT;
 int sSector = SEC_CENTER;
-Vec3f sAnchor;    // world units, the compass position THIS tick (body position + sAnchorOff)
-Vec3f sAnchorOff; // hand-at-hold-start relative to Link's BODY: the compass rides along when
-                  // the player keeps moving with the stick (or walks physically) mid-hold, and
-                  // locomotion never reads as a flick — only hand motion relative to the body.
+Vec3f sAnchor;    // world units, the compass position THIS tick (playspace origin + sAnchorOff)
+Vec3f sAnchorOff; // hand-at-hold-start relative to the PLAYSPACE origin (the camera/hands anchor):
+                  // the compass rides joystick locomotion exactly like the hands and the view, and
+                  // stays where it was in the room if you physically step. Locomotion never reads
+                  // as a flick: the hand and the compass are measured against the same anchor.
+                  // Drawn as a playspace child (VR_RegisterPlayspaceChildMatrix), so the renderer
+                  // places it from the live anchor every frame — it can never trail the view.
 Vec3f sHeadRight; // camera right captured at open: stable targets, "left is left as you see it"
 
 // No grace window and no synthetic press: selection is distinct from activation.
@@ -93,6 +96,16 @@ int sTextboxRecentTicks = 0;
 
 int SwordHand() {
     return CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT;
+}
+
+// The playspace origin right now (the same interpolated anchor VR_GetHandPose composes with).
+bool PlayspaceOrigin(Vec3f* out) {
+    float m[4][4];
+    if (!VR_GetPlayspaceMatrix(m)) {
+        return false;
+    }
+    *out = { m[3][0], m[3][1], m[3][2] };
+    return true;
 }
 
 int SelectorHand() {
@@ -357,9 +370,10 @@ void ItemSelectTick() {
                     right = { 1.0f, 0.0f, 0.0f };
                 }
                 Player* player = GET_PLAYER(gPlayState);
+                Vec3f origin = player->actor.world.pos;
+                PlayspaceOrigin(&origin);
                 sAnchor = { pos[0], pos[1], pos[2] };
-                sAnchorOff = { pos[0] - player->actor.world.pos.x, pos[1] - player->actor.world.pos.y,
-                               pos[2] - player->actor.world.pos.z };
+                sAnchorOff = { pos[0] - origin.x, pos[1] - origin.y, pos[2] - origin.z };
                 sHeadRight = right;
                 sHand = hand;
                 sSector = SEC_CENTER;
@@ -378,12 +392,12 @@ void ItemSelectTick() {
     }
 
     const bool held = (VR_GetControllerButton(sHand) & SelectorMask()) != 0;
-    // The compass rides Link's body: re-derive the anchor from the current body position so
-    // stick movement (and physical walking) carries it along instead of leaving it behind.
+    // The compass rides the playspace: re-derive it from the anchor the hand pose below is
+    // composed with, so stick movement carries it along and never reads as hand motion.
     {
-        Player* player = GET_PLAYER(gPlayState);
-        sAnchor = { player->actor.world.pos.x + sAnchorOff.x, player->actor.world.pos.y + sAnchorOff.y,
-                    player->actor.world.pos.z + sAnchorOff.z };
+        Vec3f origin = GET_PLAYER(gPlayState)->actor.world.pos;
+        PlayspaceOrigin(&origin);
+        sAnchor = { origin.x + sAnchorOff.x, origin.y + sAnchorOff.y, origin.z + sAnchorOff.z };
     }
     float pos[3];
     float quat[4];
@@ -535,10 +549,23 @@ extern "C" void VrItemSelect_Draw(void) {
     // (and never harvested: the visual-mesh gather requires depth-write). The anchor rides in
     // a RECORDED matrix (vertices are anchor-local) so frame interpolation glides the compass
     // at render rate alongside the world instead of stepping it at the 20 Hz game rate.
+    // While open, the matrix is a playspace child: the renderer re-places it from the live anchor
+    // every frame (it wins over interpolation), so joystick movement can't leave it behind.
+    Vec3f origin;
+    const bool openInSpace = sOpen && PlayspaceOrigin(&origin);
+    if (openInSpace) {
+        sAnchor = { origin.x + sAnchorOff.x, origin.y + sAnchorOff.y, origin.z + sAnchorOff.z };
+    }
     FrameInterpolation_RecordOpenChild((const void*)sSelDl, 0);
     Matrix_Translate(sAnchor.x, sAnchor.y, sAnchor.z, MTXMODE_NEW);
-    gSPMatrix(p++, MATRIX_NEWMTX(gPlayState->state.gfxCtx), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    Mtx* anchorMtx = MATRIX_NEWMTX(gPlayState->state.gfxCtx);
+    gSPMatrix(p++, anchorMtx, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
     FrameInterpolation_RecordCloseChild();
+    if (openInSpace) {
+        MtxF local;
+        SkinMatrix_SetTranslate(&local, sAnchorOff.x, sAnchorOff.y, sAnchorOff.z);
+        VR_RegisterPlayspaceChildMatrix(anchorMtx, &local.mf[0][0]);
+    }
     gDPPipeSync(p++);
     gDPSetCycleType(p++, G_CYC_1CYCLE);
     gDPSetRenderMode(p++, G_RM_XLU_SURF, G_RM_XLU_SURF2);

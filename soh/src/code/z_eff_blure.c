@@ -1064,6 +1064,102 @@ void EffectBlure_DrawSimple(EffectBlure* this2, GraphicsContext* gfxCtx) {
     }
 }
 
+// SOH [VR] The live head of Link's swing trail (VrSwing.cpp FeedTrail): one more quad from the
+// newest recorded edge, exactly as the trail draws it, to the blade's edge NOW. The trail records
+// at 20 Hz while the blade renders at headset rate, so without this the trail sat up to a tick
+// behind the blade. The two halves load under different matrices into one vertex buffer (the
+// skinning trick): the recorded edge in world space, the live edge under a matrix welded to the
+// controller (Player_VrWeldMtxToHand), which the interpreter re-composes with the live hand pose per
+// eye, so that edge rides the rendered blade. Same render state as the trail just drew with.
+extern PlayState* gPlayState;
+
+static void EffectBlure_VrDrawLiveHead(EffectBlure* this, GraphicsContext* gfxCtx) {
+    s32 vrHand;
+    f32 tip[3];
+    f32 base[3];
+    s32 last = this->numElements - 1;
+    EffectBlureElement* elem;
+    Vec3s p1;
+    Vec3s p2;
+    Vec3s unused1;
+    Vec3s unused2;
+    Color_RGBA8 c1;
+    Color_RGBA8 c2;
+    Color_RGBA8 live1;
+    Color_RGBA8 live2;
+    MtxF translate;
+    MtxF scale;
+    MtxF cur;
+    Mtx* mtx;
+    Vtx* vtx;
+    s32 i;
+
+    if ((gPlayState == NULL) || (last < 0) || !VrCombat_TrailLiveEdge(this, &vrHand, tip, base)) {
+        return;
+    }
+    elem = &this->elements[last];
+    if (elem->state != 1) {
+        return;
+    }
+    EffectBlure_GetComputedValues(this, last, (f32)elem->timer / (f32)this->elemDuration, &p1, &p2, &c1, &c2);
+    EffectBlure_GetComputedValues(this, last, 0.0f, &unused1, &unused2, &live1, &live2);
+
+    // Live edge: vertices relative to the recorded base in tenths (the smooth draw's precision
+    // trick), under Translate(base) . Scale(0.1) welded to the hand that drew the blade.
+    SkinMatrix_SetTranslate(&translate, base[0], base[1], base[2]);
+    SkinMatrix_SetScale(&scale, 0.1f, 0.1f, 0.1f);
+    SkinMatrix_MtxFMtxFMult(&translate, &scale, &cur);
+    mtx = SkinMatrix_MtxFToNewMtx(gfxCtx, &cur);
+    vtx = Graph_Alloc(gfxCtx, 4 * sizeof(Vtx));
+    if ((mtx == NULL) || (vtx == NULL) || !Player_VrWeldMtxToHand(gPlayState, mtx, vrHand, &cur.mf[0][0])) {
+        return;
+    }
+
+    for (i = 0; i < 4; i++) {
+        vtx[i].v.flag = 0;
+        vtx[i].v.tc[0] = 0;
+        vtx[i].v.tc[1] = 0;
+    }
+    vtx[0].v.ob[0] = p1.x;
+    vtx[0].v.ob[1] = p1.y;
+    vtx[0].v.ob[2] = p1.z;
+    vtx[0].v.cn[0] = c1.r;
+    vtx[0].v.cn[1] = c1.g;
+    vtx[0].v.cn[2] = c1.b;
+    vtx[0].v.cn[3] = c1.a;
+    vtx[1].v.ob[0] = p2.x;
+    vtx[1].v.ob[1] = p2.y;
+    vtx[1].v.ob[2] = p2.z;
+    vtx[1].v.cn[0] = c2.r;
+    vtx[1].v.cn[1] = c2.g;
+    vtx[1].v.cn[2] = c2.b;
+    vtx[1].v.cn[3] = c2.a;
+    vtx[2].v.ob[0] = Math_FNearbyIntF((tip[0] - base[0]) * 10.0f);
+    vtx[2].v.ob[1] = Math_FNearbyIntF((tip[1] - base[1]) * 10.0f);
+    vtx[2].v.ob[2] = Math_FNearbyIntF((tip[2] - base[2]) * 10.0f);
+    vtx[2].v.cn[0] = live1.r;
+    vtx[2].v.cn[1] = live1.g;
+    vtx[2].v.cn[2] = live1.b;
+    vtx[2].v.cn[3] = live1.a;
+    vtx[3].v.ob[0] = 0;
+    vtx[3].v.ob[1] = 0;
+    vtx[3].v.ob[2] = 0;
+    vtx[3].v.cn[0] = live2.r;
+    vtx[3].v.cn[1] = live2.g;
+    vtx[3].v.cn[2] = live2.b;
+    vtx[3].v.cn[3] = live2.a;
+
+    OPEN_DISPS(gfxCtx);
+    gSPMatrix(POLY_XLU_DISP++, &gMtxClear, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPVertex(POLY_XLU_DISP++, vtx, 2, 0);
+    gSPMatrix(POLY_XLU_DISP++, mtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPVertex(POLY_XLU_DISP++, &vtx[2], 2, 2);
+    // The trail's own winding: older edge (p1, p2) then newer edge (p1, p2).
+    gSP2Triangles(POLY_XLU_DISP++, 0, 1, 3, 0, 0, 3, 2, 0);
+    gSPMatrix(POLY_XLU_DISP++, &gMtxClear, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    CLOSE_DISPS(gfxCtx);
+}
+
 void EffectBlure_Draw(void* thisx, GraphicsContext* gfxCtx) {
     EffectBlure* this = (EffectBlure*)thisx;
     Vtx* vtx;
@@ -1183,6 +1279,7 @@ void EffectBlure_Draw(void* thisx, GraphicsContext* gfxCtx) {
             }
         } else if (this->drawMode < 2) {
             EffectBlure_DrawSimple(this, gfxCtx);
+            EffectBlure_VrDrawLiveHead(this, gfxCtx); // SOH [VR] Link's trail (the simple path)
         } else {
             EffectBlure_DrawSmooth(this, gfxCtx);
         }

@@ -540,7 +540,7 @@ extern "C" void VrBottle_Tick(PlayState* play, Player* player) {
 
     const int hand = BottleHand();
     const float u = 0.01f * WorldScale(); // cm -> game units
-    const float amplitude = CVarGetFloat("gVrBottleShakeAmplitude", 6.0f) * u;
+    const float amplitude = CVarGetFloat("gVrBottleShakeAmplitude", 9.0f) * u;
     // Reversal hysteresis: a fifth of a shake, never below 0.5 cm (tracking jitter) nor above
     // 2 cm (so a small return bounce still separates two strokes).
     float hysteresis = amplitude * 0.2f;

@@ -193,7 +193,7 @@ extern "C" bool VrBody_EndCollision(PlayState* play, Player* player) {
         VR_AddRoomscaleDisplacement(pushX, pushZ);
     }
     const s16 yaw = player->actor.shape.rot.y;
-    const float fwd = CVarGetFloat("gVrHeadOffsetForward", 6.0f), side = CVarGetFloat("gVrHeadOffsetSide", 0.0f);
+    const float fwd = CVarGetFloat("gVrHeadOffsetForward", 0.0f), side = CVarGetFloat("gVrHeadOffsetSide", 0.0f);
     const float headOff[2] = { Math_SinS(yaw) * fwd - Math_CosS(yaw) * side,
                                Math_CosS(yaw) * fwd + Math_SinS(yaw) * side };
     float view[2];

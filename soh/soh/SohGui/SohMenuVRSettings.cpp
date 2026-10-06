@@ -14,6 +14,7 @@
 #include <ship/Context.h>
 #include <ship/window/gui/Gui.h>
 #include "soh/Enhancements/vr-combat/VrCombat.h"
+#include "soh/Enhancements/vr-combat/VrCutsceneView.h"
 
 namespace SohGui {
 
@@ -36,25 +37,17 @@ static const std::map<int32_t, const char*> vrTurnStyleOptions = {
     { 1, "Smooth" },
 };
 
-static const std::map<int32_t, const char*> vrHudAttachOptions = {
-    { 0, "Head (Floating)" },
-    { 1, "Left Hand" },
-    { 2, "Right Hand" },
-};
-
 static const std::map<int32_t, const char*> vrHudLayoutOptions = {
     { 0, "Wrist Panels" },
     { 1, "Classic (one panel)" },
 };
 
+// Open state of the collapsed "Calibration (Dev)" groups (closed every launch).
+static bool sVrComfortCalOpen = false;
+static bool sVrCombatCalOpen = false;
+
 static bool VrHudWristLayout() {
     return CVarGetInteger("gVrHudLayout", 0) == 0;
-}
-static bool VrHudClassicHead() {
-    return !VrHudWristLayout() && CVarGetInteger("gVrHudAttach", 0) == 0;
-}
-static bool VrHudClassicHand() {
-    return !VrHudWristLayout() && CVarGetInteger("gVrHudAttach", 0) != 0;
 }
 
 static const std::map<int32_t, const char*> vrItemSelHandOptions = {
@@ -85,7 +78,8 @@ static const std::map<int32_t, const char*> vrItemSelSwapOptions = {
 //
 // There are THREE independent binding sets. The two GAMEPLAY sets are picked by gVrItemSelect,
 // so swapping control schemes in the menu never costs you your bindings; selector mode reserves
-// both TRIGGERS for using the held item, so their rows won't bind there. The OCARINA set takes
+// both TRIGGERS for using the held item, so their rows have no CVar there (nullptr; every access
+// is behind VrInputReserved). The OCARINA set takes
 // over the controllers whenever the ocarina interface is up (in either scheme) — it maps notes,
 // sharps/flats and put-away, and because every selector reservation stands down while playing,
 // notes may live on any input including the triggers. Defaults must match
@@ -104,19 +98,19 @@ static const VrInputDef sVrInputDefsClassic[] = {
     { "R Stick", "gVrBindRStickClick", 0 },         { "R Menu", "gVrBindRMenu", 0 },
 };
 static const VrInputDef sVrInputDefsSelector[] = {
-    { "L Trigger", "gVrBindSelLTrigger", 0 },              { "L Grip", "gVrBindSelLGrip", BTN_R },
+    { "L Trigger", nullptr, 0 },                           { "L Grip", "gVrBindSelLGrip", BTN_R },
     { "X", "gVrBindSelLPrimary", 0 },                      { "Y", "gVrBindSelLSecondary", 0 },
     { "L Stick", "gVrBindSelLStickClick", BTN_START },     { "L Menu", "gVrBindSelLMenu", BTN_START },
-    { "R Trigger", "gVrBindSelRTrigger", 0 },              { "R Grip", "gVrBindSelRGrip", BTN_Z },
+    { "R Trigger", nullptr, 0 },                           { "R Grip", "gVrBindSelRGrip", BTN_Z },
     { "A", "gVrBindSelRPrimary", BTN_A },                  { "B", "gVrBindSelRSecondary", BTN_B },
     { "R Stick", "gVrBindSelRStickClick", 0 },             { "R Menu", "gVrBindSelRMenu", 0 },
 };
 static const VrInputDef sVrInputDefsOcarina[] = {
-    { "L Trigger", "gVrBindOcaLTrigger", BTN_CDOWN }, { "L Grip", "gVrBindOcaLGrip", BTN_Z },
-    { "X", "gVrBindOcaLPrimary", BTN_CLEFT },         { "Y", "gVrBindOcaLSecondary", BTN_CUP },
+    { "L Trigger", "gVrBindOcaLTrigger", 0 },         { "L Grip", "gVrBindOcaLGrip", BTN_Z },
+    { "X", "gVrBindOcaLPrimary", 0 },                 { "Y", "gVrBindOcaLSecondary", 0 },
     { "L Stick", "gVrBindOcaLStickClick", 0 },        { "L Menu", "gVrBindOcaLMenu", 0 },
-    { "R Trigger", "gVrBindOcaRTrigger", BTN_A },     { "R Grip", "gVrBindOcaRGrip", BTN_R },
-    { "A", "gVrBindOcaRPrimary", BTN_CRIGHT },        { "B", "gVrBindOcaRSecondary", BTN_B },
+    { "R Trigger", "gVrBindOcaRTrigger", 0 },         { "R Grip", "gVrBindOcaRGrip", BTN_R },
+    { "A", "gVrBindOcaRPrimary", BTN_A },             { "B", "gVrBindOcaRSecondary", BTN_B },
     { "R Stick", "gVrBindOcaRStickClick", 0 },        { "R Menu", "gVrBindOcaRMenu", 0 },
     // Stick DIRECTIONS, bindable in the ocarina set only (indices 12+, order up/down/left/right
     // per hand — the listener below computes 12 + hand * 4 + dir). A hand with any direction
@@ -126,10 +120,10 @@ static const VrInputDef sVrInputDefsOcarina[] = {
     { "L Stick " ICON_FA_ARROW_DOWN, "gVrBindOcaLStickDown", 0 },
     { "L Stick " ICON_FA_ARROW_LEFT, "gVrBindOcaLStickLeft", 0 },
     { "L Stick " ICON_FA_ARROW_RIGHT, "gVrBindOcaLStickRight", 0 },
-    { "R Stick " ICON_FA_ARROW_UP, "gVrBindOcaRStickUp", 0 },
-    { "R Stick " ICON_FA_ARROW_DOWN, "gVrBindOcaRStickDown", 0 },
-    { "R Stick " ICON_FA_ARROW_LEFT, "gVrBindOcaRStickLeft", 0 },
-    { "R Stick " ICON_FA_ARROW_RIGHT, "gVrBindOcaRStickRight", 0 },
+    { "R Stick " ICON_FA_ARROW_UP, "gVrBindOcaRStickUp", BTN_CUP },
+    { "R Stick " ICON_FA_ARROW_DOWN, "gVrBindOcaRStickDown", BTN_CDOWN },
+    { "R Stick " ICON_FA_ARROW_LEFT, "gVrBindOcaRStickLeft", BTN_CLEFT },
+    { "R Stick " ICON_FA_ARROW_RIGHT, "gVrBindOcaRStickRight", BTN_CRIGHT },
 };
 static const int kVrButtonInputCount = 12;
 static const int kVrOcarinaInputCount = 20; // buttons + the 8 stick directions
@@ -862,7 +856,7 @@ static void VrLensReadout(WidgetInfo& info) {
     ImGui::Text("Lens: %s   (%s)", sState[state], sGate[gate]);
     if (state == 2 && d.carryHand >= 0 && d.carryHand < 2) {
         if (d.glassToFaceCm >= 0.0f) {
-            ImGui::Text("In the %s hand — glass %.0f cm from the worn spot (goes on within %.0f)%s", sHand[d.carryHand],
+            ImGui::Text("In the %s hand — glass %.0f cm from your face (goes on within %.0f)%s", sHand[d.carryHand],
                         d.glassToFaceCm, d.wearDistanceCm, d.armed ? "" : "   move it away first");
         } else {
             ImGui::Text("In the %s hand", sHand[d.carryHand]);
@@ -1035,6 +1029,34 @@ static void VrClimbReadout(WidgetInfo& info) {
 }
 
 void SohMenu::AddMenuVRSettings() {
+    // Collapsible groups. The menu has no collapsing-header widget, so vrBeginCollapsed adds a
+    // custom header (ImGui::CollapsingHeader, closed by default) and vrEndCollapsed wraps the
+    // PreFunc of every widget added to that page since, so each one also hides while its header
+    // is closed (its own hide condition still applies when open).
+    auto vrWidgets = [this](WidgetPath& path) -> std::vector<WidgetInfo>& {
+        return menuEntries.at(path.sectionName).sidebars.at(path.sidebarName).columnWidgets.at(path.column);
+    };
+    auto vrBeginCollapsed = [this, &vrWidgets](WidgetPath& path, const char* label, bool* open) -> size_t {
+        AddWidget(path, label, WIDGET_CUSTOM)
+            .CustomFunction([label, open](WidgetInfo& info) { *open = ImGui::CollapsingHeader(label); })
+            .HideInSearch(true);
+        return vrWidgets(path).size();
+    };
+    auto vrEndCollapsed = [&vrWidgets](WidgetPath& path, size_t begin, bool* open) {
+        std::vector<WidgetInfo>& widgets = vrWidgets(path);
+        for (size_t i = begin; i < widgets.size(); i++) {
+            WidgetFunc inner = widgets[i].preFunc;
+            widgets[i].preFunc = [inner, open](WidgetInfo& info) {
+                info.isHidden = false;
+                if (inner != nullptr) {
+                    inner(info);
+                }
+                if (!*open) {
+                    info.isHidden = true;
+                }
+            };
+        }
+    };
     AddMenuEntry("VR Settings", CVAR_SETTING("Menu.VRSettingsSidebarSection"));
 
     // ------------------------------------------------------------------ General
@@ -1043,9 +1065,6 @@ void SohMenu::AddMenuVRSettings() {
 
     AddWidget(generalPath, "VR Mode (F9)", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrEnabled")
-        // Turning VR on while the OpenGL renderer is running raises the swap-to-DX11 popup
-        // (VR is D3D11-only); no-op when disabling or already on DX11.
-        .Callback([](WidgetInfo& info) { SohGui::PromptVrDx11SwapIfNeeded(); })
         .Options(CheckboxOptions()
                      .DefaultValue(true)
                      .Tooltip("Switch between VR and regular flat-screen play at any time - F9 does "
@@ -1087,6 +1106,80 @@ void SohMenu::AddMenuVRSettings() {
             "scene still loading), first person would leave you staring at nothing, so the view "
             "automatically rides the game's camera until it comes back to Link. Disable to stay "
             "strictly in Link's head no matter what."));
+    // ------------------------------------------------------- Cutscenes
+    AddSidebarEntry("VR Settings", "Cutscenes", 1);
+    WidgetPath cutscenePath = { "VR Settings", "Cutscenes", SECTION_COLUMN_1 };
+    auto cutsceneTableHidden = []() {
+        return !CVarGetInteger("gVrEnabled", 1) || !CVarGetInteger("gVrFirstPerson", 1) ||
+               !CVarGetInteger("gVrCutsceneThirdPerson", 0);
+    };
+
+    AddWidget(cutscenePath, "Choose Third-Person Cutscenes", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrCutsceneThirdPerson")
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !CVarGetInteger("gVrEnabled", 1) || !CVarGetInteger("gVrFirstPerson", 1);
+        })
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "In first person, the cutscenes ticked below play from their original camera, exactly "
+            "like Third Person view: you move and turn with the game's camera and can still look "
+            "around and lean with your head. Unticked ones stay in Link's eyes. First person "
+            "resumes when the cutscene ends. Off = every cutscene stays first person (the far-"
+            "camera fallback on the General page still applies)."));
+    AddWidget(cutscenePath, "All Third Person", WIDGET_BUTTON)
+        .PreFunc([cutsceneTableHidden](WidgetInfo& info) { info.isHidden = cutsceneTableHidden(); })
+        .Options(ButtonOptions().Tooltip("Tick every row."))
+        .Callback([](WidgetInfo& info) {
+            int count;
+            const VrCutsceneRow* rows = VrCutsceneView_Rows(&count);
+            for (int i = 0; i < count; i++) {
+                CVarSetInteger(rows[i].cvar, 1);
+            }
+            CVarSave();
+        });
+    AddWidget(cutscenePath, "All First Person", WIDGET_BUTTON)
+        .PreFunc([cutsceneTableHidden](WidgetInfo& info) { info.isHidden = cutsceneTableHidden(); })
+        .Options(ButtonOptions().Tooltip("Untick every row."))
+        .Callback([](WidgetInfo& info) {
+            int count;
+            const VrCutsceneRow* rows = VrCutsceneView_Rows(&count);
+            for (int i = 0; i < count; i++) {
+                CVarSetInteger(rows[i].cvar, 0);
+            }
+            CVarSave();
+        });
+    AddWidget(cutscenePath, "Reset to Defaults", WIDGET_BUTTON)
+        .PreFunc([cutsceneTableHidden](WidgetInfo& info) { info.isHidden = cutsceneTableHidden(); })
+        .Options(ButtonOptions().Tooltip("Story cutscenes, bosses and the Zelda courtyard third "
+                                         "person; everything else first person."))
+        .Callback([](WidgetInfo& info) {
+            int count;
+            const VrCutsceneRow* rows = VrCutsceneView_Rows(&count);
+            for (int i = 0; i < count; i++) {
+                CVarClear(rows[i].cvar);
+            }
+            CVarSave();
+        });
+    {
+        int count;
+        const VrCutsceneRow* rows = VrCutsceneView_Rows(&count);
+        const char* group = nullptr;
+        for (int i = 0; i < count; i++) {
+            const VrCutsceneRow& row = rows[i];
+            if (group == nullptr || strcmp(group, row.group) != 0) {
+                group = row.group;
+                AddWidget(cutscenePath, group, WIDGET_SEPARATOR_TEXT)
+                    .PreFunc([cutsceneTableHidden](WidgetInfo& info) { info.isHidden = cutsceneTableHidden(); });
+            }
+            CheckboxOptions options = CheckboxOptions().DefaultValue(row.thirdPerson);
+            if (row.tooltip != nullptr) {
+                options.Tooltip(row.tooltip);
+            }
+            AddWidget(cutscenePath, row.label, WIDGET_CVAR_CHECKBOX)
+                .CVar(row.cvar)
+                .PreFunc([cutsceneTableHidden](WidgetInfo& info) { info.isHidden = cutsceneTableHidden(); })
+                .Options(options);
+        }
+    }
 
     // ------------------------------------------------------- Comfort & Movement
     AddSidebarEntry("VR Settings", "Comfort & Movement", 1);
@@ -1229,49 +1322,6 @@ void SohMenu::AddMenuVRSettings() {
                               "full tilt = full speed). Off: any tilt past the deadzone turns "
                               "at the full configured speed."));
 
-    AddWidget(comfortPath, "Body", WIDGET_SEPARATOR_TEXT);
-    AddWidget(comfortPath, "Small Body Collider", WIDGET_CVAR_CHECKBOX)
-        .CVar("gVrSmallBody")
-        .Options(CheckboxOptions()
-                     .DefaultValue(true)
-                     .Tooltip("Lets you get right up to walls, blocks and ledges, as if you had a small "
-                              "collision radius. Link's real collision is unchanged for everything (climbing, "
-                              "ledges, tunnels, gaps, grabbing): your view is a small circle inside his, so it "
-                              "can get closer to a wall than his body but never past anything that stops "
-                              "him. Needs roomscale. Off: your view stays at his body's distance."));
-    AddWidget(comfortPath, "Small Body Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrSmallBodyRadiusCm")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
-        .Options(FloatSliderOptions()
-                     .Min(8.0f)
-                     .Max(40.0f)
-                     .DefaultValue(15.0f)
-                     .Step(1.0f)
-                     .Format("%.0f")
-                     .Tooltip("How close your eyes can get to a wall. Never closer than the headset's near "
-                              "clip allows, and never bigger than Link's own radius."));
-    AddWidget(comfortPath, "Log Small Body (diagnostic)", WIDGET_CVAR_CHECKBOX)
-        .CVar("gVrBodyLog")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
-        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
-            "Writes vrbody_log.csv next to the game: one line per tick of what moves your view off "
-            "Link's centre. For debugging only; leave off."));
-    AddWidget(comfortPath, "VrBodyReadout", WIDGET_CUSTOM)
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
-        .CustomFunction([](WidgetInfo& info) {
-            VrBodyDebug d;
-            VrBody_GetDebug(&d);
-            if (!d.active) {
-                ImGui::TextUnformatted("Small body: inactive (VR first person with roomscale only)");
-                return;
-            }
-            const float ws = VR_GetWorldScale() < 1.0f ? 35.0f : VR_GetWorldScale();
-            ImGui::Text("Body radius %.0f cm, yours %.0f cm: view may sit %.0f cm off centre (now %.0f)%s",
-                        d.bigRadius / ws * 100.0f, d.smallRadius / ws * 100.0f, d.slack / ws * 100.0f,
-                        d.offset / ws * 100.0f, d.room ? "   closing in on a wall" : "");
-        })
-        .HideInSearch(true);
-
     AddWidget(comfortPath, "World Scale", WIDGET_SEPARATOR_TEXT);
     AddWidget(comfortPath, "Match Scale To My Height (Be Link-Sized)", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrAutoWorldScale")
@@ -1339,6 +1389,51 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Child Link's open hand, wrist to fingertip, in real centimetres. "
                               "Calibrate as child the same way. Applies live."));
     AddWidget(comfortPath, "VrHandScaleReadout", WIDGET_CUSTOM).CustomFunction(VrHandScaleReadout).HideInSearch(true);
+
+    const size_t comfortCalBegin =
+        vrBeginCollapsed(comfortPath, "Calibration (Dev)##ComfortCal", &sVrComfortCalOpen);
+    AddWidget(comfortPath, "Body", WIDGET_SEPARATOR_TEXT);
+    AddWidget(comfortPath, "Small Body Collider", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrSmallBody")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Lets you get right up to walls, blocks and ledges, as if you had a small "
+                              "collision radius. Link's real collision is unchanged for everything (climbing, "
+                              "ledges, tunnels, gaps, grabbing): your view is a small circle inside his, so it "
+                              "can get closer to a wall than his body but never past anything that stops "
+                              "him. Needs roomscale. Off: your view stays at his body's distance."));
+    AddWidget(comfortPath, "Small Body Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallBodyRadiusCm")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(8.0f)
+                     .Max(40.0f)
+                     .DefaultValue(15.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("How close your eyes can get to a wall. Never closer than the headset's near "
+                              "clip allows, and never bigger than Link's own radius."));
+    AddWidget(comfortPath, "Log Small Body (diagnostic)", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBodyLog")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Writes vrbody_log.csv next to the game: one line per tick of what moves your view off "
+            "Link's centre. For debugging only; leave off."));
+    AddWidget(comfortPath, "VrBodyReadout", WIDGET_CUSTOM)
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrSmallBody", 1); })
+        .CustomFunction([](WidgetInfo& info) {
+            VrBodyDebug d;
+            VrBody_GetDebug(&d);
+            if (!d.active) {
+                ImGui::TextUnformatted("Small body: inactive (VR first person with roomscale only)");
+                return;
+            }
+            const float ws = VR_GetWorldScale() < 1.0f ? 35.0f : VR_GetWorldScale();
+            ImGui::Text("Body radius %.0f cm, yours %.0f cm: view may sit %.0f cm off centre (now %.0f)%s",
+                        d.bigRadius / ws * 100.0f, d.smallRadius / ws * 100.0f, d.slack / ws * 100.0f,
+                        d.offset / ws * 100.0f, d.room ? "   closing in on a wall" : "");
+        })
+        .HideInSearch(true);
 
     AddWidget(comfortPath, "Hand Rotation (sword hand)", WIDGET_SEPARATOR_TEXT);
     AddWidget(comfortPath, "Tune while looking at the SWORD hand - the other hand mirrors automatically.", WIDGET_TEXT);
@@ -1434,6 +1529,8 @@ void SohMenu::AddMenuVRSettings() {
         .Options(FloatSliderOptions().Min(-15.0f).Max(15.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
 
 
+    vrEndCollapsed(comfortPath, comfortCalBegin, &sVrComfortCalOpen);
+
     // ------------------------------------------------------------------ Gameplay
     AddSidebarEntry("VR Settings", "Gameplay", 1);
     WidgetPath gameplayPath = { "VR Settings", "Gameplay", SECTION_COLUMN_1 };
@@ -1482,6 +1579,18 @@ void SohMenu::AddMenuVRSettings() {
             "game. Off by default in VR: the bars just float on the head-locked overlay and "
             "shrink your view. Flat-screen play is unaffected by this setting (see Enhancements "
             "> Graphics for the flat equivalent)."));
+    AddWidget(gameplayPath, "Get-Item Hold-Up Distance: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrGetItemDistance")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrFirstPerson", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(100.0f)
+                     .DefaultValue(20.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("When you get an item and Link holds it up, it sits this much further "
+                              "out from your hands (away from you), so it isn't right on top of "
+                              "your head. It still follows your hands."));
 
     // ----------------------------------------------------------- Physical Combat
     AddSidebarEntry("VR Settings", "Physical Combat", 1);
@@ -1503,6 +1612,8 @@ void SohMenu::AddMenuVRSettings() {
             "speed readout below. Arrow color previews the swing tiers: green = too slow to "
             "count, yellow = normal hit, red = strong hit."));
 
+    const size_t combatCalBegin =
+        vrBeginCollapsed(physPath, "Calibration (Dev)##CombatCal", &sVrCombatCalOpen);
     AddWidget(physPath, "Sword Swing Speeds", WIDGET_SEPARATOR_TEXT);
     AddWidget(physPath, "Arm Swing At: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrPhysArmSpeed")
@@ -2122,6 +2233,8 @@ void SohMenu::AddMenuVRSettings() {
     AddWidget(physPath, "Live Hand Speed", WIDGET_SEPARATOR_TEXT);
     AddWidget(physPath, "VrPhysCombatReadout", WIDGET_CUSTOM).CustomFunction(VrPhysCombatReadout).HideInSearch(true);
 
+    vrEndCollapsed(physPath, combatCalBegin, &sVrCombatCalOpen);
+
     // --------------------------------------------------------------- HUD & Menus
     AddSidebarEntry("VR Settings", "HUD & Menus", 1);
     WidgetPath hudPath = { "VR Settings", "HUD & Menus", SECTION_COLUMN_1 };
@@ -2136,72 +2249,24 @@ void SohMenu::AddMenuVRSettings() {
                               "wrist; item buttons, the A button and the minimap on your RIGHT "
                               "wrist, each on a small dark panel (VR Settings -> Wrist HUD lays them "
                               "out). Glance at a hand to read it. "
-                              "Classic: the whole HUD on one panel, in front of you or on one hand. "
+                              "Classic: the whole HUD on one panel floating in front of you. "
                               "Text boxes always get their own panel in front of you either way."));
-    AddWidget(hudPath, "HUD Attachment", WIDGET_CVAR_COMBOBOX)
-        .CVar("gVrHudAttach")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = VrHudWristLayout(); })
-        .Options(ComboboxOptions()
-                     .DefaultIndex(0)
-                     .ComboMap(vrHudAttachOptions)
-                     .Tooltip("Where the HUD (hearts, rupees, C-button items) lives: floating in "
-                              "front of your face, or pinned to a controller like a wrist panel - "
-                              "glance at your hand to check your status. Falls back to head-locked "
-                              "while that controller isn't tracked. Text boxes are not part of the "
-                              "HUD: they always appear on their own panel in front of you (Text "
-                              "Panel below)."));
     AddWidget(hudPath, "HUD Distance: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudDistance")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = VrHudWristLayout(); })
         .Options(FloatSliderOptions().Min(0.5f).Max(5.0f).DefaultValue(2.0f).Step(0.1f).Format("%.1f"));
     AddWidget(hudPath, "HUD Size: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudSize")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = VrHudWristLayout(); })
         .Options(FloatSliderOptions().Min(0.2f).Max(3.0f).DefaultValue(1.5f).Step(0.05f).Format("%.2f"));
     AddWidget(hudPath, "HUD Horizontal: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudOffX")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = VrHudWristLayout(); })
         .Options(FloatSliderOptions().Min(-1.5f).Max(1.5f).DefaultValue(0.0f).Step(0.02f).Format("%.2f"));
     AddWidget(hudPath, "HUD Vertical: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHudOffY")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHead(); })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = VrHudWristLayout(); })
         .Options(FloatSliderOptions().Min(-1.5f).Max(1.5f).DefaultValue(0.0f).Step(0.02f).Format("%.2f"));
-    AddWidget(hudPath, "Hand HUD Size: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHudHandSize")
-        .PreFunc([](WidgetInfo& info) {
-            info.isHidden = VrHudWristLayout() || CVarGetInteger("gVrHudAttach", 0) == 0;
-        })
-        .Options(FloatSliderOptions().Min(0.1f).Max(1.0f).DefaultValue(0.35f).Step(0.01f).Format("%.2f"));
-    AddWidget(hudPath, "Hand HUD Sideways: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHudHandOffX")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
-        .Options(FloatSliderOptions()
-                     .Min(-0.5f)
-                     .Max(0.5f)
-                     .DefaultValue(0.0f)
-                     .Step(0.01f)
-                     .Format("%.2f")
-                     .Tooltip("Offset along the grip's sideways axis (mirrored automatically for "
-                              "the right hand, so one tuning fits both)."));
-    AddWidget(hudPath, "Hand HUD Up: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHudHandOffY")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
-        .Options(FloatSliderOptions().Min(-0.5f).Max(0.5f).DefaultValue(0.10f).Step(0.01f).Format("%.2f"));
-    AddWidget(hudPath, "Hand HUD Forward: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHudHandOffZ")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
-        .Options(FloatSliderOptions().Min(-0.5f).Max(0.5f).DefaultValue(-0.08f).Step(0.01f).Format("%.2f"));
-    AddWidget(hudPath, "Hand HUD Tilt: %.0f deg", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHudHandPitch")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !VrHudClassicHand(); })
-        .Options(FloatSliderOptions()
-                     .Min(-90.0f)
-                     .Max(90.0f)
-                     .DefaultValue(-40.0f)
-                     .Step(1.0f)
-                     .Format("%.0f")
-                     .Tooltip("Tilt about the grip so the panel faces your eyes at a natural "
-                              "wrist-watch angle."));
 
     // Text boxes (dialogue, signs, chests, item text) and the ocarina staff always get their own
     // panel that soft-follows in front of the player; only its placement is configurable. All in
@@ -2315,6 +2380,71 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Raise or lower the window relative to your eye height when the file "
                               "select came up."));
 
+    AddWidget(hudPath, "Boot Logo", WIDGET_SEPARATOR_TEXT);
+    AddWidget(hudPath, "Boot Logo in World Space", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrLogoWorld")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "The N64 logo screen at startup floats in front of you, where you were looking when it "
+            "came up. Off: the floating menu panel."));
+    AddWidget(hudPath, "Boot Logo Distance: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLogoDistance")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrLogoWorld", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.8f)
+                     .Max(6.0f)
+                     .DefaultValue(2.5f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How far in front of you the logo hangs. It keeps the same apparent "
+                              "size at any distance."));
+    AddWidget(hudPath, "Boot Logo Height: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLogoHeightCm")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrLogoWorld", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(-60.0f)
+                     .Max(60.0f)
+                     .DefaultValue(0.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Raise or lower the logo relative to your eye height when it came up."));
+
+    AddWidget(hudPath, "Title Screen", WIDGET_SEPARATOR_TEXT);
+    AddWidget(hudPath, "Title Logo on a Floating Panel", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrTitleLogoPanel")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "The title screen's logo, PRESS START and copyright float in front of you and follow your "
+            "head softly (like text boxes). Off: they go to the HUD, where the wrist layout hides them."));
+    AddWidget(hudPath, "Title Logo Width: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTitleLogoWidth")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrTitleLogoPanel", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.5f)
+                     .Max(5.0f)
+                     .DefaultValue(1.8f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("Width of the whole title frame (the logo spans about two thirds of it)."));
+    AddWidget(hudPath, "Title Logo Distance: %.1f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTitleLogoDistance")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrTitleLogoPanel", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(0.5f)
+                     .Max(6.0f)
+                     .DefaultValue(2.2f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How far in front of you the title floats."));
+    AddWidget(hudPath, "Title Logo Height: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrTitleLogoHeight")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrTitleLogoPanel", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(-1.0f)
+                     .Max(1.0f)
+                     .DefaultValue(0.0f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("Raise or lower the title relative to your eyes."));
+
     AddWidget(hudPath, "Pause Menu", WIDGET_SEPARATOR_TEXT);
     AddWidget(hudPath, "Pause Menu in World Space", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPauseWorldSpace")
@@ -2403,6 +2533,40 @@ void SohMenu::AddMenuVRSettings() {
                      .Step(1.0f)
                      .Format("%.0f")
                      .Tooltip("Darkens the frozen world behind the pages so they read. 0 = no dim."));
+    AddWidget(hudPath, "Pause HUD Canvas Width: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseHudWidth")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(50.0f)
+                     .Max(400.0f)
+                     .DefaultValue(130.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Width of the screen the HUD (hearts, magic, buttons, rupees) sits on "
+                              "while paused. 100 = the original TV frame around the front page (default 130). "
+                              "Elements stay pinned to their corners and keep their size."));
+    AddWidget(hudPath, "Pause HUD Canvas Height: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseHudHeight")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(50.0f)
+                     .Max(400.0f)
+                     .DefaultValue(100.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Height of the screen the HUD sits on while paused. 100 = the original "
+                              "TV frame. Elements stay pinned to their corners and keep their size."));
+    AddWidget(hudPath, "Pause HUD Element Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPauseHudScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPauseWorldSpace", 1); })
+        .Options(FloatSliderOptions()
+                     .Min(25.0f)
+                     .Max(300.0f)
+                     .DefaultValue(100.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Size of the HUD elements while paused (their gap from the corner "
+                              "scales with them)."));
 
     // ---------------------------------------------------------------- Performance
     // --------------------------------------------------------------- Wrist HUD
@@ -2502,11 +2666,28 @@ void SohMenu::AddMenuVRSettings() {
                               "Z-target and the rest moved onto the grips and face buttons. "
                               "Turning it off restores the classic scheme and its bindings "
                               "exactly as you left them."));
-    // Dev Test Items: the sandbox for in-development physical-item work (bombs/nuts, archery,
-    // and whatever item lands next). Calibration lives here, deliberately separate from the
-    // stable input settings, so the mess stays contained while items are being tuned.
-    AddSidebarEntry("VR Settings", "Dev Test Items", 1);
-    WidgetPath devPath = { "VR Settings", "Dev Test Items", SECTION_COLUMN_1 };
+    // Developer: the sandbox for in-development physical-item work (bombs/nuts, archery, and
+    // whatever item lands next), followed by the one-time calibration. Kept apart from the
+    // stable settings so the mess stays contained while items are being tuned.
+    AddSidebarEntry("VR Settings", "Developer", 1);
+    WidgetPath devPath = { "VR Settings", "Developer", SECTION_COLUMN_1 };
+    AddWidget(devPath, "Renderer", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Graphics Test Card", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrGfxTestCard")
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Draws a test card over every VR image (both eyes, HUD, text panel, menu panel) "
+                              "and the desktop mirror: red top-left, green top-right, blue bottom-left, white "
+                              "bottom-right, a 16-step grey ramp along the top and an arrow pointing up. "
+                              "Shows at a glance whether each image is upright and whether the greys match "
+                              "between renderers."));
+    AddWidget(devPath, "OpenGL: Flip Wrist/Text Crop", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrGlSubImageYUp")
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("OpenGL VR only. If the wrist panels or the text panel show the wrong part of "
+                              "their image (with the test card on: blue corner where red should be), toggle "
+                              "this. Takes effect immediately."));
     AddWidget(devPath, "Bombs, Nuts & Bombchus", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Bomb and Nut Throws", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysicalItemThrows")
@@ -3034,8 +3215,14 @@ void SohMenu::AddMenuVRSettings() {
                      .Format("%.0f")
                      .Tooltip("Releasing the string with less draw than this cancels instead of "
                               "firing - no ammo or magic is spent."));
+    AddWidget(devPath, "Show Nock Icon", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrArcheryShowIcon")
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Shows a small Deku Nut where the string is nocked on the bow and slingshot, so you "
+            "can see where to pinch. Off by default: the string itself is the target."));
     AddWidget(devPath, "Nock Icon Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryIconScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrArcheryShowIcon", 0); })
         .Options(FloatSliderOptions()
                      .Min(3.0f)
                      .Max(100.0f)
@@ -3153,7 +3340,7 @@ void SohMenu::AddMenuVRSettings() {
         .Options(FloatSliderOptions()
                      .Min(2.0f)
                      .Max(25.0f)
-                     .DefaultValue(6.0f)
+                     .DefaultValue(9.0f)
                      .Step(1.0f)
                      .Format("%.0f")
                      .Tooltip("How far the bottle mouth must travel downward in one stroke for "
@@ -3232,7 +3419,7 @@ void SohMenu::AddMenuVRSettings() {
                               "lens turns on (uses magic as usual). Grip it at your face to take "
                               "it off. Switching items takes it off too. Disable to toggle the "
                               "lens with the trigger instead."));
-    AddWidget(devPath, "Lens Size (glass radius, cm)", WIDGET_CVAR_SLIDER_FLOAT)
+    AddWidget(devPath, "Lens Size In Hand (glass radius, cm)", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrLensRadius")
         .Options(FloatSliderOptions()
                      .Min(2.0f)
@@ -3240,17 +3427,27 @@ void SohMenu::AddMenuVRSettings() {
                      .DefaultValue(5.0f)
                      .Step(0.5f)
                      .Format("%.1f")
-                     .Tooltip("Real size of the lens glass. Bigger (or closer) = a wider view "
-                              "through it."));
+                     .Tooltip("Real size of the lens glass while you hold it (and in the pocket)."));
+    AddWidget(devPath, "Lens Size Worn (glass radius, cm)", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrLensWornRadius")
+        .Options(FloatSliderOptions()
+                     .Min(2.0f)
+                     .Max(40.0f)
+                     .DefaultValue(6.2f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Size of the lens once it's on your face. Bigger (or closer) = a "
+                              "wider view through it."));
     AddWidget(devPath, "Worn Distance (cm)", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrLensDistance")
         .Options(FloatSliderOptions()
                      .Min(2.0f)
-                     .Max(25.0f)
-                     .DefaultValue(7.0f)
+                     .Max(60.0f)
+                     .DefaultValue(8.6f)
                      .Step(0.5f)
                      .Format("%.1f")
-                     .Tooltip("How far in front of your eyes the lens sits once it's on."));
+                     .Tooltip("How far in front of your eyes the lens sits once it's on. You still "
+                              "put it on by holding it up to your face (within 8 cm)."));
     AddWidget(devPath, "Worn Side Offset (cm)", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrLensSide")
         .Options(FloatSliderOptions()
@@ -3278,8 +3475,8 @@ void SohMenu::AddMenuVRSettings() {
                      .DefaultValue(10.0f)
                      .Step(0.5f)
                      .Format("%.1f")
-                     .Tooltip("The lens attaches once its glass comes this close to where it "
-                              "sits when worn."));
+                     .Tooltip("The lens attaches once its glass comes this close to your face "
+                              "(the worn spot, or 8 cm in front of your eyes if that's further)."));
     AddWidget(devPath, "Lens Pocket Size (%)", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrLensPreviewScale")
         .Options(FloatSliderOptions()
@@ -3337,6 +3534,12 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Size of the mask waiting in front of you, relative to its real "
                               "size in your hand."));
     AddWidget(devPath, "VrMaskReadout", WIDGET_CUSTOM).CustomFunction(VrMaskReadout).HideInSearch(true);
+    AddWidget(devPath, "Diagnostics", WIDGET_SEPARATOR_TEXT);
+    AddWidget(devPath, "Log ReDead Grabs (diagnostic)", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrRedeadLog")
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Writes vrredead_log.csv next to the game: one line per tick per nearby ReDead/Gibdo with "
+            "everything its notice, freeze and grab checks read. For debugging issue #47; leave off."));
     AddWidget(buttonsPath, "Selector Hand", WIDGET_CVAR_COMBOBOX)
         .CVar("gVrItemSelHand")
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrItemSelect", 1); })
@@ -3383,9 +3586,9 @@ void SohMenu::AddMenuVRSettings() {
                            "C-buttons/snap turn.",
               WIDGET_TEXT);
 
-    // ---------------------------------------------------------------- Calibration
-    AddSidebarEntry("VR Settings", "Calibration", 2);
-    WidgetPath calPath = { "VR Settings", "Calibration", SECTION_COLUMN_1 };
+    // ---------------------------------------------------------------- Calibration (Developer page)
+    WidgetPath calPath = devPath;
+    AddWidget(calPath, "Calibration", WIDGET_SEPARATOR_TEXT);
 
     AddWidget(calPath, "One-time tuning. The defaults were calibrated in-headset; you should not "
                        "need anything here unless the hands, weapon aim or camera look off on "
@@ -3467,11 +3670,13 @@ void SohMenu::AddMenuVRSettings() {
         .Options(FloatSliderOptions()
                      .Min(-60.0f)
                      .Max(60.0f)
-                     .DefaultValue(6.0f)
+                     .DefaultValue(0.0f)
                      .Step(1.0f)
                      .Format("%.1f")
                      .Tooltip("Move the eye anchor along Link's facing (game units). Positive pushes "
-                              "the camera forward out of his head; negative pulls it back."));
+                              "the camera forward out of his head; negative pulls it back. 0 = centred, "
+                              "so turning rotates exactly about your eye; any offset swings the view "
+                              "around Link's centre as he turns."));
     AddWidget(calPath, "Side Offset: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHeadOffsetSide")
         .Options(FloatSliderOptions()
@@ -3519,16 +3724,10 @@ void SohMenu::AddMenuVRSettings() {
                      "gVrWorldScale=%.1f\n"
                      "gVrScreenDistance=%.1f\n"
                      "gVrScreenSize=%.1f\n"
-                     "gVrHudAttach=%d\n"
                      "gVrHudDistance=%.1f\n"
                      "gVrHudSize=%.2f\n"
                      "gVrHudOffX=%.2f\n"
-                     "gVrHudOffY=%.2f\n"
-                     "gVrHudHandSize=%.2f\n"
-                     "gVrHudHandOffX=%.2f\n"
-                     "gVrHudHandOffY=%.2f\n"
-                     "gVrHudHandOffZ=%.2f\n"
-                     "gVrHudHandPitch=%.0f\n",
+                     "gVrHudOffY=%.2f\n",
                      CVarGetInteger("gVrMotionHands", 1), CVarGetInteger("gVrLeftHanded", 0),
                      CVarGetInteger("gVrHandMirrorSword", 1), CVarGetInteger("gVrHandMirrorShield", 1),
                      CVarGetInteger("gVrHandMirrorAxis", 2),
@@ -3542,14 +3741,11 @@ void SohMenu::AddMenuVRSettings() {
                      CVarGetFloat("gVrAimCalPitch", 0.0f), CVarGetFloat("gVrAimCalYaw", 0.0f),
                      CVarGetFloat("gVrAimOffX", 0.0f), CVarGetFloat("gVrAimOffY", 0.0f),
                      CVarGetFloat("gVrAimOffZ", 0.0f),
-                     CVarGetFloat("gVrHeadHeightOffset", -9.0f), CVarGetFloat("gVrHeadOffsetForward", 6.0f),
+                     CVarGetFloat("gVrHeadHeightOffset", -9.0f), CVarGetFloat("gVrHeadOffsetForward", 0.0f),
                      CVarGetFloat("gVrHeadOffsetSide", 0.0f), CVarGetFloat("gVrWorldScale", 35.0f),
                      CVarGetFloat("gVrScreenDistance", 2.2f), CVarGetFloat("gVrScreenSize", 2.4f),
-                     CVarGetInteger("gVrHudAttach", 0), CVarGetFloat("gVrHudDistance", 2.0f),
-                     CVarGetFloat("gVrHudSize", 1.5f), CVarGetFloat("gVrHudOffX", 0.0f),
-                     CVarGetFloat("gVrHudOffY", 0.0f), CVarGetFloat("gVrHudHandSize", 0.35f),
-                     CVarGetFloat("gVrHudHandOffX", 0.0f), CVarGetFloat("gVrHudHandOffY", 0.10f),
-                     CVarGetFloat("gVrHudHandOffZ", -0.08f), CVarGetFloat("gVrHudHandPitch", -40.0f));
+                     CVarGetFloat("gVrHudDistance", 2.0f), CVarGetFloat("gVrHudSize", 1.5f),
+                     CVarGetFloat("gVrHudOffX", 0.0f), CVarGetFloat("gVrHudOffY", 0.0f));
             ImGui::SetClipboardText(buf);
         });
 }

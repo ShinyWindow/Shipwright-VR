@@ -7,8 +7,13 @@
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/savestate_serialize.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
 
 #include <string.h>
+
+// SOH [VR] sys_math3d.c, not in functions.h. Used to test Twinrova's beam against the shield quad.
+s32 Math3D_TriLineIntersect(Vec3f* v0, Vec3f* v1, Vec3f* v2, f32 nx, f32 ny, f32 nz, f32 originDist,
+                            Vec3f* linePointA, Vec3f* linePointB, Vec3f* intersect, s32 fromFront);
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -807,6 +812,86 @@ s32 BossTw_BeamHitPlayerCheck(BossTw* this, PlayState* play) {
 }
 
 /**
+ * SOH [VR] Physical shield (markdowns/TWINROVA-VANILLA.md). The vanilla phase-1 reflection is
+ * gated on the R stance (PLAYER_STATE1_SHIELDING + Link facing her), which the controller-held
+ * shield never sets. The VR version keeps vanilla's shape with the shield itself in place of the
+ * stance: presented toward her -> she aims at it and it catches the beam; once reflecting, the beam
+ * stays on the shield (vanilla: while R is held) and the player steers it by turning the shield.
+ */
+static void BossTw_VrShieldCenter(Player* player, Vec3f* center) {
+    Vec3f* quad = player->shieldQuad.dim.quad;
+
+    center->x = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) * 0.25f;
+    center->y = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) * 0.25f;
+    center->z = (quad[0].z + quad[1].z + quad[2].z + quad[3].z) * 0.25f;
+}
+
+/**
+ * SOH [VR] The shield is presented toward `from`: its FRONT faces that way and it is between there
+ * and Link (horizontally nearer to her than his body, so never behind his back). Front = the
+ * direction vanilla sends the reflection: shieldMf, yaw + 0x8000, pitch negated (BossTw_ShootBeam).
+ */
+static s32 BossTw_VrShieldPresented(Player* player, Vec3f* from) {
+    Vec3f fwd = { 0.0f, 0.0f, 1.0f };
+    Vec3f front;
+    Vec3f center;
+    Vec3s shieldRot;
+
+    BossTw_VrShieldCenter(player, &center);
+    if ((SQ(center.x - from->x) + SQ(center.z - from->z)) >=
+        (SQ(player->actor.world.pos.x - from->x) + SQ(player->actor.world.pos.z - from->z))) {
+        return false;
+    }
+
+    Matrix_MtxFToYXZRotS(&player->shieldMf, &shieldRot, 0);
+    Matrix_RotateY(((s16)(shieldRot.y + 0x8000) / 32768.0f) * M_PI, MTXMODE_NEW);
+    Matrix_RotateX((-shieldRot.x / 32768.0f) * M_PI, MTXMODE_APPLY);
+    Matrix_MultVec3f(&fwd, &front);
+
+    return (front.x * (center.x - from->x) + front.y * (center.y - from->y) + front.z * (center.z - from->z)) < 0.0f;
+}
+
+/**
+ * SOH [VR] The beam, as far as it currently reaches, crosses the presented shield quad (the two
+ * triangles the collision system splits a quad into). Writes the distance to the hit.
+ */
+static s32 BossTw_VrBeamCaughtByShield(BossTw* this, Player* player, f32* hitDist) {
+    Vec3f fwd = { 0.0f, 0.0f, 1.0f };
+    Vec3f beamDir;
+    Vec3f segEnd;
+    Vec3f hitPos;
+    TriNorm tri;
+    Vec3f* quad = player->shieldQuad.dim.quad;
+
+    if ((this->beamDist <= 0.0f) || !BossTw_VrShieldPresented(player, &this->beamOrigin)) {
+        return false;
+    }
+
+    Matrix_RotateY(this->beamYaw, MTXMODE_NEW);
+    Matrix_RotateX(this->beamPitch, MTXMODE_APPLY);
+    Matrix_MultVec3f(&fwd, &beamDir);
+    segEnd.x = this->beamOrigin.x + beamDir.x * this->beamDist;
+    segEnd.y = this->beamOrigin.y + beamDir.y * this->beamDist;
+    segEnd.z = this->beamOrigin.z + beamDir.z * this->beamDist;
+
+    Math3D_TriNorm(&tri, &quad[2], &quad[3], &quad[1]);
+    if (!Math3D_TriLineIntersect(&tri.vtx[0], &tri.vtx[1], &tri.vtx[2], tri.plane.normal.x, tri.plane.normal.y,
+                                 tri.plane.normal.z, tri.plane.originDist, &this->beamOrigin, &segEnd, &hitPos,
+                                 false)) {
+        Math3D_TriNorm(&tri, &quad[1], &quad[0], &quad[2]);
+        if (!Math3D_TriLineIntersect(&tri.vtx[0], &tri.vtx[1], &tri.vtx[2], tri.plane.normal.x, tri.plane.normal.y,
+                                     tri.plane.normal.z, tri.plane.originDist, &this->beamOrigin, &segEnd, &hitPos,
+                                     false)) {
+            return false;
+        }
+    }
+
+    *hitDist = sqrtf(SQ(hitPos.x - this->beamOrigin.x) + SQ(hitPos.y - this->beamOrigin.y) +
+                     SQ(hitPos.z - this->beamOrigin.z));
+    return true;
+}
+
+/**
  * Checks if the beam shot by `this` will be reflected
  * returns 0 if the beam will not be reflected,
  * returns 1 if the beam will be reflected,
@@ -816,6 +901,37 @@ s32 BossTw_CheckBeamReflection(BossTw* this, PlayState* play) {
     Vec3f offset;
     Vec3f vec;
     Player* player = GET_PLAYER(play);
+
+    // SOH [VR] Physical shield: the shield in the beam replaces the stance + facing gate and the
+    // window around Link's feet. Outcomes are vanilla's: the mirror shield reflects; any other
+    // shield diverts for 11 ticks, then the beam goes through (beamDist untouched) and hits Link.
+    if (VrCombat_ShieldHeld(player)) {
+        f32 hitDist;
+
+        if (!BossTw_VrBeamCaughtByShield(this, player, &hitDist)) {
+            return 0;
+        }
+
+        if (Player_HasMirrorShieldEquipped(play)) {
+            this->beamDist = hitDist;
+            return 1;
+        }
+
+        if (sBeamDivertTimer > 10) {
+            return 0;
+        }
+
+        if (sBeamDivertTimer == 0) {
+            BossTw_AddShieldDeflectEffect(play, 10.0f, this->actor.params);
+            play->envCtx.unk_D8 = 1.0f;
+            this->timers[0] = 10;
+            Sfx_PlaySfxCentered(NA_SE_IT_SHIELD_REFLECT_MG2);
+        }
+
+        sBeamDivertTimer++;
+        this->beamDist = hitDist;
+        return 2;
+    }
 
     if (player->stateFlags1 & PLAYER_STATE1_SHIELDING &&
         (s16)(player->actor.shape.rot.y - this->actor.shape.rot.y + 0x8000) < 0x2000 &&
@@ -959,7 +1075,16 @@ void BossTw_ShootBeam(BossTw* this, PlayState* play) {
 
     if (this->timers[1] != 0) {
         Math_ApproachS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 5, this->rotateSpeed);
-        if ((player->stateFlags1 & PLAYER_STATE1_SHIELDING) &&
+        // SOH [VR] Physical shield presented toward her = vanilla's "shielding and facing her":
+        // she aims at the shield. Otherwise the vanilla branches below (no stance -> his body).
+        if (VrCombat_ShieldHeld(player) && BossTw_VrShieldPresented(player, &this->beamOrigin)) {
+            Vec3f shieldCenter;
+
+            BossTw_VrShieldCenter(player, &shieldCenter);
+            Math_ApproachF(&this->targetPos.x, shieldCenter.x, 1.0f, 400.0f);
+            Math_ApproachF(&this->targetPos.y, shieldCenter.y, 1.0f, 400.0f);
+            Math_ApproachF(&this->targetPos.z, shieldCenter.z, 1.0f, 400.0f);
+        } else if ((player->stateFlags1 & PLAYER_STATE1_SHIELDING) &&
             ((s16)((player->actor.shape.rot.y - this->actor.shape.rot.y) + 0x8000) < 0x2000) &&
             ((s16)((player->actor.shape.rot.y - this->actor.shape.rot.y) + 0x8000) > -0x2000)) {
             Math_ApproachF(&this->targetPos.x, player->bodyPartsPos[15].x, 1.0f, 400.0f);
@@ -1124,7 +1249,23 @@ void BossTw_ShootBeam(BossTw* this, PlayState* play) {
                 break;
 
             case 1:
-                if (CHECK_BTN_ALL(input->cur.button, BTN_R)) {
+                // SOH [VR] Physical shield: no R to hold. Once caught, the reflection stays for the
+                // rest of this beam while the shield is in hand: the beam stays glued to the shield
+                // (vanilla glues it to the shield hand) and the player steers it freely by turning
+                // the shield. Shield leaves the hand (sword put away) = vanilla's release.
+                if (VrCombat_ShieldHeld(player)) {
+                    Vec3f shieldCenter;
+
+                    BossTw_VrShieldCenter(player, &shieldCenter);
+                    this->beamDist = sqrtf(SQ(xDiff) + SQ(yDiff) + SQ(zDiff));
+                    Math_ApproachF(&this->beamReflectionDist, 2000.0f, 1.0f, 40.0f);
+                    Math_ApproachF(&this->targetPos.x, shieldCenter.x, 1.0f, 400.0f);
+                    Math_ApproachF(&this->targetPos.y, shieldCenter.y, 1.0f, 400.0f);
+                    Math_ApproachF(&this->targetPos.z, shieldCenter.z, 1.0f, 400.0f);
+                    if ((this->work[CS_TIMER_1] % 4) == 0) {
+                        BossTw_AddRingEffect(play, &shieldCenter, 0.5f, 3.0f, 0xFF, this->actor.params, 1, 150);
+                    }
+                } else if (CHECK_BTN_ALL(input->cur.button, BTN_R)) {
                     Player* player = GET_PLAYER(play);
 
                     this->beamDist = sqrtf(SQ(xDiff) + SQ(yDiff) + SQ(zDiff));

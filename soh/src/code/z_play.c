@@ -16,6 +16,7 @@
 
 #include <vr_interface.h>
 #include "soh/Enhancements/vr-combat/VrCombat.h"
+#include "soh/Enhancements/vr-combat/VrCutsceneView.h"
 
 #include <time.h>
 #include <assert.h>
@@ -1403,7 +1404,12 @@ void Play_Draw(PlayState* play) {
             sVrFarCamFallback = false;
         }
 
-        if (CVarGetInteger("gVrFirstPerson", 1) && !sVrFarCamFallback) {
+        // Cutscenes in third person (opt-in, per-cutscene table in VrCutsceneView.cpp): ride the
+        // original camera exactly like third-person VR, then return to Link's eyes. The return
+        // recenters heading/roomscale like the far-camera fallback does.
+        bool vrCutsceneThirdPerson = VrCutsceneView_ThirdPerson(play);
+
+        if (CVarGetInteger("gVrFirstPerson", 1) && !sVrFarCamFallback && !vrCutsceneThirdPerson) {
             Player* vrPlayer = GET_PLAYER(play);
             // Anchor to the actor ROOT (smooth, no walk-cycle bob) plus eye height, instead of the
             // animated head bone (actor.focus.pos) which carries the up/down bob and sway. The body
@@ -1449,7 +1455,7 @@ void Play_Draw(PlayState* play) {
             // wall radius) that stop the body, and only ever shortens toward that center: facing a
             // wall, the eye pulls back into Link instead of poking past his collision.
             {
-                f32 vrHeadFwd = CVarGetFloat("gVrHeadOffsetForward", 6.0f);
+                f32 vrHeadFwd = CVarGetFloat("gVrHeadOffsetForward", 0.0f);
                 f32 vrHeadSide = CVarGetFloat("gVrHeadOffsetSide", 0.0f);
                 if (vrHeadFwd != 0.0f || vrHeadSide != 0.0f) {
                     s16 vrBodyYaw = vrPlayer->actor.shape.rot.y;

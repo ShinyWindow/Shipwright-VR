@@ -126,8 +126,7 @@ extern "C" bool VrFileSelect_WorldSpace(void) {
 extern "C" bool VrFileSelect_FrameSync(void) {
     const bool worldSpace = VrFileSelect_WorldSpace();
     if (!worldSpace) {
-        VR_SetRectWorldPanel(0, nullptr);
-        sAnchored = false;
+        sAnchored = false; // graph.c turns the rect panel off when nobody publishes one
     } else {
         // The window is anchored in the world: an artificial turn would swing the playspace out
         // from under it. VrPause_FrameSync (called first) writes this flag every frame, so only

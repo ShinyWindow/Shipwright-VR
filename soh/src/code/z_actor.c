@@ -2876,7 +2876,7 @@ void Actor_Draw(PlayState* play, Actor* actor) {
         s32 vrMeshFlesh = (actor->category == ACTORCAT_BOSS);
         // SOH [VR] Physical carrying: an object held in the hand is drawn welded to the live hand
         // (every Mtx it makes, VrCarry_BeginDrawWeld), and is not world geometry for the blade.
-        s32 vrCarryWeld = VrCarry_BeginDrawWeld(actor);
+        s32 vrCarryWeld = VrCarry_BeginDrawWeld(actor) || VrItemThrow_BeginDrawWeld(actor);
         vrMeshMasked = vrMeshMasked || vrCarryWeld;
         if (vrMeshMasked) {
             VrCombat_MeshMaskPush(play->state.gfxCtx);

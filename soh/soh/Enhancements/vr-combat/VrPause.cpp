@@ -200,11 +200,14 @@ extern "C" bool VrPause_WorldSpace(void) {
     if (pauseCtx->state == 0 || pauseCtx->debugState != 0) {
         return false;
     }
-    // Game over (states 8..0x11) draws screen-space texture rectangles; it keeps the panel.
-    if (pauseCtx->state >= 8 && pauseCtx->state <= 0x11) {
-        return false;
-    }
+    // Game over (states 8..0x11) is world space too: its pages are the same 3D pages, and its
+    // "GAME OVER" title (screen-space texture rectangles) goes onto the HUD frame's virtual screen
+    // (VrPause_GameOverRects).
     return true;
+}
+
+static bool InGameOver(void) {
+    return gPlayState != NULL && gPlayState->pauseCtx.state >= 8 && gPlayState->pauseCtx.state <= 0x11;
 }
 
 extern "C" bool VrPause_InputMenuMode(void) {
@@ -220,7 +223,10 @@ extern "C" bool VrPause_InputMenuMode(void) {
 // depth d frames the front page exactly like the TV did. It sits at the name panel's depth, facing
 // the player's original front, and never spins (vanilla's HUD stays put while the pages turn).
 // The library draws the HUD image on it.
-static void PublishHudPanel() {
+// The game-over screen's texture rectangles ("GAME OVER") land on the same virtual screen, at its
+// TV size (the HUD canvas sliders only resize the HUD quad), so they sit where the TV showed them
+// relative to the pages.
+static void PublishHudPanel(bool gameOverRects) {
     const float s = BoxScale();
     const float lift = CVarGetFloat("gVrPauseHeightCm", 0.0f) * 0.01f * WorldScale();
     const float frontDist = EyeToFrontPage();
@@ -231,12 +237,29 @@ static void PublishHudPanel() {
     const float center[3] = { sCenter[0] - sinf(sYaw0) * depth * s, sCenter[1] + lift,
                               sCenter[2] - cosf(sYaw0) * depth * s };
     VR_SetHudWorldPanel(1, center, sYaw0, w, h);
+    if (gameOverRects) {
+        MtxF panel;
+        Matrix_Push();
+        Matrix_Translate(center[0], center[1], center[2], MTXMODE_NEW);
+        Matrix_RotateY(sYaw0, MTXMODE_APPLY);
+        Matrix_Scale(w * 0.5f, h * 0.5f, 1.0f, MTXMODE_APPLY);
+        Matrix_Get(&panel);
+        Matrix_Pop();
+        VR_SetRectWorldPanel(1, &panel.mf[0][0]);
+    }
+}
+
+static bool sGameOverRects = false;
+
+extern "C" bool VrPause_GameOverRects(void) {
+    return sGameOverRects;
 }
 
 extern "C" bool VrPause_FrameSync(void) {
     const bool worldSpace = VrPause_WorldSpace();
+    sGameOverRects = worldSpace && sAnchored && InGameOver();
     if (worldSpace && sAnchored) {
-        PublishHudPanel();
+        PublishHudPanel(sGameOverRects);
     } else {
         const float zero[3] = { 0.0f, 0.0f, 0.0f };
         VR_SetHudWorldPanel(0, zero, 0.0f, 0.0f, 0.0f);

@@ -2,6 +2,10 @@
 #include "objects/object_rd/object_rd.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
+
+// SOH [VR] Grab diagnostic (issue #47): this tick's grab attempt, -1 none / 0 refused / 1 grabbed.
+static s32 sVrGrabAttempt = -1;
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -365,7 +369,9 @@ void EnRd_WalkToPlayer(EnRd* this, PlayState* play) {
     if (!this->grabWaitTimer && (Actor_WorldDistXYZToActor(&this->actor, &player->actor) <= 45.0f) &&
         Actor_IsFacingPlayer(&this->actor, 0x38E3)) {
         player->actor.freezeTimer = 0;
+        sVrGrabAttempt = 0; // SOH [VR] diagnostic
         if (play->grabPlayer(play, player)) {
+            sVrGrabAttempt = 1; // SOH [VR] diagnostic
             this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
             EnRd_SetupGrab(this);
         }
@@ -852,6 +858,10 @@ void EnRd_Update(Actor* thisx, PlayState* play) {
             CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
         }
     }
+
+    // SOH [VR] Grab diagnostic (gVrRedeadLog, issue #47).
+    VrRedead_LogTick(&this->actor, this->action, this->playerStunWaitTimer, this->grabWaitTimer, sVrGrabAttempt);
+    sVrGrabAttempt = -1;
 }
 
 s32 EnRd_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx, Gfx** gfx) {

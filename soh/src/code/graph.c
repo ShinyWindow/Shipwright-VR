@@ -339,16 +339,36 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
         // The world-space file select (VrFileSelect.cpp) is the other exception: its sky and menu
         // window render in stereo. After VrPause_FrameSync: both write the turn-suppression flag.
         s32 vrFileSelectWorldSpace = VrFileSelect_FrameSync();
+        // The world-space N64 logo screen (VrLogo.cpp), the same way.
+        s32 vrLogoWorldSpace = VrLogo_FrameSync();
+        // Screen-space texture rectangles go onto a world panel only for whoever published one this
+        // frame (file select, logo, the world-space game over); everyone else gets them full-eye.
+        if (!vrFileSelectWorldSpace && !vrLogoWorldSpace && !VrPause_GameOverRects()) {
+            VR_SetRectWorldPanel(0, NULL);
+        }
         // SOH [VR] Physical climbing: the view is locked to the gripping hand — an artificial turn
         // would swing the playspace around the hand mid-pull (VrClimb.cpp). Also drops the lock
         // whenever the player isn't ticking (pause, transitions).
         if (VrClimb_FrameSync()) {
             VR_SetTurnSuppressed(1);
         }
-        s32 vrFlatScreen = (gPlayState == NULL) ? !vrFileSelectWorldSpace
+        s32 vrFlatScreen = (gPlayState == NULL) ? !(vrFileSelectWorldSpace || vrLogoWorldSpace)
                                                 : (gPlayState->pauseCtx.state != 0 && !vrPauseWorldSpace);
         VR_SetFlatScreen(vrFlatScreen);
         Message_VrRouteText(!vrFlatScreen);
+        // The title screen (the opening's logo, "PRESS START" and copyright, En_Mag) is overlay
+        // drawing with no HUD element tags, so the wrist HUD dropped it. Its whole overlay goes on
+        // the text panel instead: floating in front of the player and soft-following the head, sized
+        // for the logo (gVrTitleLogoWidth / Distance / Height, metres).
+        s32 vrTitlePanel = !vrFlatScreen && (gPlayState != NULL) &&
+                           (gSaveContext.gameMode == GAMEMODE_TITLE_SCREEN) && CVarGetInteger("gVrTitleLogoPanel", 1);
+        if (vrTitlePanel) {
+            VR_SetTextDisplayList(gfxCtx->overlayBuffer, 0.0f, 0.0f, 1.0f, 1.0f);
+            VR_SetTextPanelLayout(CVarGetFloat("gVrTitleLogoWidth", 1.8f), CVarGetFloat("gVrTitleLogoDistance", 2.2f),
+                                  CVarGetFloat("gVrTitleLogoHeight", 0.0f));
+        } else {
+            VR_SetTextPanelLayout(0.0f, 0.0f, 0.0f);
+        }
         if (vrFlatScreen) {
             gSPBranchList(POLY_XLU_DISP++, gfxCtx->overlayBuffer);
             VR_SetOverlayDisplayList(NULL);
@@ -356,7 +376,7 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
             gDPPipeSync(POLY_XLU_DISP++);
             gDPFullSync(POLY_XLU_DISP++);
             gSPEndDisplayList(POLY_XLU_DISP++);
-            VR_SetOverlayDisplayList(gfxCtx->overlayBuffer);
+            VR_SetOverlayDisplayList(vrTitlePanel ? NULL : gfxCtx->overlayBuffer);
         }
     } else {
         gSPBranchList(POLY_XLU_DISP++, gfxCtx->overlayBuffer);

@@ -369,13 +369,15 @@ extern "C" void VrArchery_Reset(void) {
 
 // Nock-point icon: a miniature Deku Nut (the classic drop model, gameplay_keep so it is
 // always loaded) rendered in-world at the nock anchor while the bow/slingshot is out and no
-// nock is drawn. It grows when the string hand is in pinch reach. DELIBERATELY minimal gates
-// (mode + cvar + weapon out, none of the input-side availability checks): the icon is a
-// check that the nock sits on the model and a liveness diagnostic — it must show even when
-// the input gates are the thing that is broken. extern "C" linkage is load-bearing for the
-// block-scope FrameInterpolation declarations inside OPEN_DISPS (see VrItemSelect_Draw).
+// nock is drawn. It grows when the string hand is in pinch reach. Hidden by default
+// (gVrArcheryShowIcon). DELIBERATELY minimal gates otherwise (mode + cvar + weapon out, none
+// of the input-side availability checks): the icon is a check that the nock sits on the model
+// and a liveness diagnostic — it must show even when the input gates are the thing that is
+// broken. extern "C" linkage is load-bearing for the block-scope FrameInterpolation
+// declarations inside OPEN_DISPS (see VrItemSelect_Draw).
 extern "C" void VrArchery_DrawNockIcon(void) {
-    if (gPlayState == NULL || !CVarGetInteger("gVrPhysArchery", 1) || !VrItemSelect_ModeActive() || sNocked) {
+    if (gPlayState == NULL || !CVarGetInteger("gVrArcheryShowIcon", 0) || !CVarGetInteger("gVrPhysArchery", 1) ||
+        !VrItemSelect_ModeActive() || sNocked) {
         return;
     }
     Player* player = GET_PLAYER(gPlayState);

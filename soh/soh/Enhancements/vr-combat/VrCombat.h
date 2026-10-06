@@ -85,6 +85,11 @@ void VrCombat_MeleeImpactConsume(struct PlayState* play, struct Player* player);
 // speed, mirrors meleeWeaponState for enemy AI, feeds the sword trail, and registers velocity-
 // gated swept sub-quads as AT colliders.
 void VrCombat_FeedMelee(struct PlayState* play, struct Player* player);
+// The live head of Link's swing trail (VrSwing.cpp FeedTrail): when the trail `blure` took an edge
+// during this frame's draw, the hand whose matrix drew the blade and that edge (world units, tip =
+// the trail's p1, base = p2). EffectBlure_Draw bridges from it to the blade's live edge, welded to
+// the controller (gVrTrailLiveHead).
+bool VrCombat_TrailLiveEdge(const void* blure, int32_t* hand, float tip[3], float base[3]);
 
 // True while any physical-melee quad has an AT hit recorded this tick. OR'd into the vanilla
 // "landing an attack cancels incoming damage this frame" check, which only knows about the
@@ -468,6 +473,28 @@ void VrPause_RefreshCullView(struct PlayState* play);
 void VrPause_BeginDraw(struct PlayState* play);
 void VrPause_PageTranslate(float x, float y, float z);
 void VrPause_PanelMatrix(void);
+// GameOverRects: the world-space pause is on a game-over state (8..0x11), whose "GAME OVER" title
+//   is screen-space texture rectangles; FrameSync has put the rect panel on the HUD frame's virtual
+//   screen for them. graph.c reads it to know who owns the rect panel this frame.
+bool VrPause_GameOverRects(void);
+
+// World-space N64 logo screen (VrLogo.cpp, gVrLogoWorld; the boot logo, ovl_title). While
+// WorldSpace() is true the logo screen renders in stereo instead of on the floating panel: the
+// spinning N64 logo and the shimmering text strip hang gVrLogoDistance metres in front of where the
+// player looked when it came up, framed exactly as vanilla's fixed 30-degree camera showed them.
+// SetActive: Title_Init (true) / Title_Destroy (false).
+// WorldSpace: VR on, gate on, the logo screen running.
+// FrameSync: once per frame from graph.c: suppresses artificial turning while active, drops the
+//   anchor when not; returns WorldSpace().
+// BeginFrame: start of Title_Main: hand-matrix clear, first person, origin anchor, anchors on the
+//   first frame, publishes the rect panel (the text strip's texture rectangles).
+// ModelTranslate: replaces the logo's Matrix_Translate(x, y, z, MTXMODE_NEW): vanilla's view base
+//   carried onto the player's head, then the vanilla translate.
+void VrLogo_SetActive(bool active);
+bool VrLogo_WorldSpace(void);
+bool VrLogo_FrameSync(void);
+void VrLogo_BeginFrame(void);
+void VrLogo_ModelTranslate(float x, float y, float z);
 
 // World-space file select (VrFileSelect.cpp, gVrFileSelectWorld). While WorldSpace() is true the
 // file select renders in stereo instead of on the floating panel: its sky surrounds the player and
@@ -479,7 +506,8 @@ void VrPause_PanelMatrix(void);
 //   explicitly, never "no PlayState" (the N64 logo has none either).
 // WorldSpace: VR on, gate on, the file select running.
 // FrameSync: once per frame from graph.c, AFTER VrPause_FrameSync: suppresses artificial turning
-//   while active, clears the rect panel and the anchor when not; returns WorldSpace().
+//   while active, drops the anchor when not (graph.c turns the rect panel off when no one publishes
+//   it); returns WorldSpace().
 // BeginFrame: start of FileChoose_Main: the VR camera duties Play_Draw would do (hand-matrix clear,
 //   first person, origin anchor), anchors on the first frame, publishes the rect panel.
 // WindowTranslate: replaces Matrix_Translate(0, 0, -93.6f, MTXMODE_NEW) at every window site.
@@ -562,6 +590,16 @@ void VrBody_NoteObjectPush(struct Actor* pusher, struct Actor* pushed, float dx,
 void VrBody_ClampBodyMove(struct PlayState* play, struct Player* player, const float* from, float* to);
 // VrCarry.cpp: the light static liftables (not cuccos / bombs, not held) and their collider cylinder.
 bool VrCarry_LightObjectCylinder(struct Actor* actor, float* radius, float* height, float* yShift);
+
+// --- Get-item hold-up (VrGetItem.cpp) ---
+// In first person the item Link holds up after opening a chest / receiving an item would sit on
+// top of your head (vanilla puts it over his raised hands, 3.3 units ahead). While the player is
+// in the get-item state, this pushes it gVrGetItemDistance cm further out from the hands
+// (horizontally, away from the eyes), so it still follows the hands. hands = vanilla's reference
+// point (the raised-hands midpoint); out = that point pushed out, world game units (the caller
+// keeps vanilla's height above it). Returns false (vanilla placement) outside first-person VR,
+// for other actors running the player draw, and for exchange items shown to NPCs.
+bool VrGetItem_HoldUpPos(struct PlayState* play, struct Player* player, const float* hands, float* out);
 typedef struct VrBodyDebug {
     int32_t active;    // the small body applies
     float slack;       // how far the view may sit from Link's centre (big - small), units
@@ -662,6 +700,9 @@ void VrCarry_Tick(struct PlayState* play, struct Player* player);
 void VrCarry_UpdateCarryPose(struct Player* player);
 bool VrCarry_GripConsumed(int32_t hand, uint16_t mask);
 bool VrCarry_BeginDrawWeld(struct Actor* actor);
+// The same draw weld for a bomb / bombchu held through VrItemThrow (its carry hand); ended by
+// VrCarry_EndDrawWeld like the carry weld.
+bool VrItemThrow_BeginDrawWeld(struct Actor* actor);
 void VrCarry_EndDrawWeld(void);
 typedef struct VrCarryDebug {
     int32_t gate;         // 0 armed; 1 Physical Carrying off; 2 not selector play / horse / water / minigame
@@ -704,6 +745,10 @@ void Player_VrWeldCurrentMtx(const void* mtx, const float* curMf16);
 // half of the vanilla "Grab" prompt — touching a WALL_FLAG 0x40 face (sTouchedWallFlags).
 int32_t Player_VrBlockAction(struct Player* player);
 int32_t Player_VrTouchingPushable(struct Player* player);
+
+// VrCombatDebug.cpp: ReDead/Gibdo grab diagnostic (gVrRedeadLog -> vrredead_log.csv), called at the end
+// of EnRd_Update. grab: -1 no attempt this tick, 0 grabPlayer refused, 1 grabbed.
+void VrRedead_LogTick(struct Actor* rd, int32_t action, int32_t stunWait, int32_t grabWait, int32_t grab);
 
 #ifdef __cplusplus
 }

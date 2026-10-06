@@ -1549,6 +1549,20 @@ void Player_VrWeldCurrentMtx(const void* mtx, const float* curMf16) {
     }
 }
 
+// SOH [VR] A new Mtx from the current matrix stack, welded to the controller driving L_HAND (the
+// sword hand): what Player_PostLimbDrawGameplay draws on the 20 Hz hand pose (the Deku Stick, the
+// bottle) then rides the live hand like the limb itself. Plain MATRIX_NEWMTX outside VR.
+static Mtx* Player_VrNewMtxOnSwordHand(PlayState* play) {
+    MtxF vrCur;
+    Mtx* mtx;
+
+    Matrix_Get(&vrCur);
+    mtx = MATRIX_NEWMTX(play->state.gfxCtx);
+    Player_VrWeldMtxToHand(play, mtx, CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT,
+                           &vrCur.mf[0][0]);
+    return mtx;
+}
+
 s32 Player_VrWeldMtxToHand(PlayState* play, const void* mtx, s32 vrHand, const float* curMf16) {
     MtxF vrInv;
     MtxF vrLocal;
@@ -1862,6 +1876,18 @@ void Player_DrawGetItemIceTrap(PlayState* play, Player* this, Vec3f* refPos, s32
 
 void Player_DrawGetItemImpl(PlayState* play, Player* this, Vec3f* refPos, s32 drawIdPlusOne) {
     f32 height = (this->exchangeItemId != EXCH_ITEM_NONE) ? 6.0f : 14.0f;
+    // SOH [VR] First person: the held-up item is pushed further out from the hands so it isn't on
+    // top of your head. Rewrite the reference point so the vanilla placement below (and the
+    // ice-trap redraw) lands the item there; vanilla's 3.3-unit nudge is replaced, not added to.
+    Vec3f vrRefPos;
+    f32 vrHands[3] = { refPos->x, refPos->y, refPos->z };
+    f32 vrPos[3];
+    if (VrGetItem_HoldUpPos(play, this, vrHands, vrPos)) {
+        vrRefPos.x = vrPos[0] - (3.3f * Math_SinS(this->actor.shape.rot.y));
+        vrRefPos.y = vrPos[1];
+        vrRefPos.z = vrPos[2] - ((3.3f + (IREG(90) / 10.0f)) * Math_CosS(this->actor.shape.rot.y));
+        refPos = &vrRefPos;
+    }
 
     OPEN_DISPS(play->state.gfxCtx);
 
@@ -2141,7 +2167,8 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
             Matrix_RotateZYX(-0x8000, 0, 0x4000, MTXMODE_APPLY);
             Matrix_Scale(1.0f, this->unk_85C, 1.0f, MTXMODE_APPLY);
 
-            gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            // SOH [VR] Model only, welded to the live hand (the tip / fire logic above is untouched).
+            gSPMatrix(POLY_OPA_DISP++, Player_VrNewMtxOnSwordHand(play), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
             gSPDisplayList(POLY_OPA_DISP++, gLinkChildLinkDekuStickDL);
 
             CLOSE_DISPS(play->state.gfxCtx);
@@ -2176,7 +2203,8 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
 
             OPEN_DISPS(play->state.gfxCtx);
 
-            gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            // SOH [VR] Welded to the live hand like the fist holding it.
+            gSPMatrix(POLY_XLU_DISP++, Player_VrNewMtxOnSwordHand(play), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
             if (GameInteractor_Should(VB_PLAYER_DRAW_BOTTLE, true, this, play)) {
                 gDPSetEnvColor(POLY_XLU_DISP++, bottleColor->r, bottleColor->g, bottleColor->b, 0);
                 gSPDisplayList(POLY_XLU_DISP++, sBottleDLists[gSaveContext.linkAge]);

@@ -177,6 +177,22 @@ extern "C" bool VrItemThrow_GripConsumed(int32_t hand, uint16_t mask) {
     return HasThrowable(player) ? hand == CarryHand() : HandNearPreview(hand);
 }
 
+// A bomb / bombchu held through this module draws welded to the live hand (every Mtx it makes,
+// the VrCarry draw weld): its world pose is written at 20 Hz from the hand, so it trailed the fist.
+// The Deku Nut carried here has no visible model while held.
+extern "C" bool VrItemThrow_BeginDrawWeld(Actor* actor) {
+    if (actor == nullptr || gPlayState == nullptr || !CVarGetInteger("gVrCarryLiveDraw", 1)) {
+        return false;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    if (!VrItemThrow_Active(player) || !HasThrowable(player) || actor != player->heldActor ||
+        actor->id == ACTOR_EN_ARROW) {
+        return false;
+    }
+    gVrMtxWeldHand = CarryHand();
+    return true;
+}
+
 extern "C" void VrItemThrow_UpdateCarryPose(Player* player) {
     if (!VrItemThrow_Active(player) || !HasThrowable(player)) return;
     float position[3], rotation[4];

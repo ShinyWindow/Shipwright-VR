@@ -4,6 +4,7 @@
 #include "soh/ShipInit.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <vector>
 #include <vr_interface.h>
 
@@ -315,3 +316,53 @@ static void RegisterVrCombatDebug() {
 }
 
 static RegisterShipInitFunc initFunc(RegisterVrCombatDebug, { "gVrPhysCombatDebug" });
+
+// ReDead / Gibdo grab diagnostic (gVrRedeadLog, issue #47: "ReDeads don't grab you with Hide Link's
+// Body on"). One CSV line per tick per ReDead within 300 units (or busy with Link): every input of
+// its notice -> freeze -> walk -> grab chain (z_en_rd.c) and of the player's grab gate
+// (func_80852F38), plus the body/hands cvars so a hidden-vs-visible A/B lands in one file.
+// grab: -1 no attempt this tick, 0 grabPlayer refused, 1 grabbed.
+extern "C" void VrRedead_LogTick(Actor* rd, int32_t action, int32_t stunWait, int32_t grabWait, int32_t grab) {
+    static FILE* sRdLog = nullptr;
+    if (!CVarGetInteger("gVrRedeadLog", 0)) {
+        if (sRdLog != nullptr) {
+            fclose(sRdLog);
+            sRdLog = nullptr;
+        }
+        return;
+    }
+    if (gPlayState == nullptr || rd == nullptr) {
+        return;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    if (player == nullptr || (rd->xzDistToPlayer > 300.0f && action != 8 && grab < 0)) {
+        return;
+    }
+    if (sRdLog == nullptr) {
+        sRdLog = fopen("vrredead_log.csv", "w");
+        if (sRdLog == nullptr) {
+            return;
+        }
+        fprintf(sRdLog, "frame,rd,params,action,xz,dist3d,dy,yawDiff,facing,stunWait,grabWait,grab,footstep,"
+                        "plFreeze,s1Block,grabbed,escape,invinc,hookshot,blockingCs,ground,plAction,"
+                        "hideBody,motionHands,firstPerson\n");
+    }
+    const float dx = rd->world.pos.x - player->actor.world.pos.x;
+    const float dy = rd->world.pos.y - player->actor.world.pos.y;
+    const float dz = rd->world.pos.z - player->actor.world.pos.z;
+    const s16 yawDiff = (s16)(rd->yawTowardsPlayer - rd->shape.rot.y);
+    const u32 s1Block = player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_HANGING_OFF_LEDGE |
+                                               PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_JUMPING |
+                                               PLAYER_STATE1_FREEFALL | PLAYER_STATE1_CLIMBING_LADDER);
+    fprintf(sRdLog, "%u,%p,%d,%d,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,0x%X,%d,%d,%d,%d,%d,%d,%p,%d,%d,%d\n",
+            (unsigned)gPlayState->state.frames, (void*)rd, rd->params, action, rd->xzDistToPlayer,
+            sqrtf(dx * dx + dy * dy + dz * dz), dy, yawDiff, Actor_IsFacingPlayer(rd, 0x38E3) ? 1 : 0, stunWait,
+            grabWait, grab, (player->stateFlags2 & PLAYER_STATE2_FOOTSTEP) ? 1 : 0, player->actor.freezeTimer,
+            (unsigned)s1Block, (player->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY) ? 1 : 0,
+            player->av2.actionVar2, player->invincibilityTimer, func_8008F128(player) ? 1 : 0,
+            Player_InBlockingCsMode(gPlayState, player) ? 1 : 0,
+            (player->actor.bgCheckFlags & BGCHECKFLAG_GROUND) ? 1 : 0, (void*)player->actionFunc,
+            CVarGetInteger("gVrHideBody", 1), CVarGetInteger("gVrMotionHands", 1),
+            (VR_IsInitialized() && VR_GetFirstPerson()) ? 1 : 0);
+    fflush(sRdLog);
+}

@@ -13,6 +13,7 @@
 #include <soh/SaveManager.h>
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h" // SOH [VR]
 #include <string.h>
 
 #include "time.h"
@@ -86,7 +87,7 @@ void Title_Draw(TitleContext* this) {
     gSPSetLights1(POLY_OPA_DISP++, sTitleLights);
     Title_SetupView(this, 0, 150.0, 300.0);
     Gfx_SetupDL_25Opa(this->state.gfxCtx);
-    Matrix_Translate(-53.0, -5.0, 0, MTXMODE_NEW);
+    VrLogo_ModelTranslate(-53.0, -5.0, 0); // SOH [VR] vanilla: Matrix_Translate(-53.0, -5.0, 0, MTXMODE_NEW)
     Matrix_Scale(1.0, 1.0, 1.0, MTXMODE_APPLY);
     Matrix_RotateZYX(0, sTitleRotY, 0, MTXMODE_APPLY);
 
@@ -127,6 +128,8 @@ void Title_Main(GameState* thisx) {
 
     OPEN_DISPS(this->state.gfxCtx);
 
+    VrLogo_BeginFrame(); // SOH [VR] world-space logo: camera anchor, rect panel
+
     gSPSegment(POLY_OPA_DISP++, 0, NULL);
     gSPSegment(POLY_OPA_DISP++, 1, this->staticSegment);
     Gfx_SetupFrame(this->state.gfxCtx, 0, 0, 0);
@@ -147,6 +150,7 @@ void Title_Main(GameState* thisx) {
 void Title_Destroy(GameState* thisx) {
     TitleContext* this = (TitleContext*)thisx;
 
+    VrLogo_SetActive(false); // SOH [VR]
     Sram_InitSram(&this->state);
 }
 
@@ -170,4 +174,5 @@ void Title_Init(GameState* thisx) {
     this->visibleDuration = 0x3C;
 
     GameInteractor_ExecuteOnZTitleInit(this);
+    VrLogo_SetActive(true); // SOH [VR]
 }

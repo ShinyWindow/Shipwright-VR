@@ -11,6 +11,7 @@ extern PlayState* gPlayState;
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/ShipInit.hpp"
 #include "soh/frame_interpolation.h"
+#include "soh/cvar_prefixes.h"
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <cmath>
 
@@ -35,9 +36,12 @@ extern PlayState* gPlayState;
 //         of the eyes, gVrLensSide / gVrLensHeight off center) puts it on — whether the grip is
 //         still closed or not. It is then glued to the HEAD (libultraship head-child matrices: the
 //         rendered center eye x a head-local transform), and the lens turns on through the vanilla
-//         gate (Magic_RequestChange). The vanilla drain runs unchanged. A fresh grip press with a
-//         hand near the worn lens takes it off into that hand (lens off); it must leave the face
-//         zone before it can go back on. Deselecting it (any switch, F9, water, horse) turns it off.
+//         gate (Magic_RequestChange). The vanilla drain runs unchanged. Like vanilla's toggle (Link's
+//         hands stay free), a worn lens STAYS ON through item switches, the sword, anything else in
+//         hand (user, October 5). It comes off only when: a fresh grip press with a hand near it
+//         takes it off (into that hand if the lens is the selected item, otherwise just off); the
+//         magic runs out; or the lens is no longer on any C / D-pad button (vanilla's own "!hasLens"
+//         rule). It must leave the face zone before it can go back on.
 //
 // The aperture: while worn, Actor_DrawLensOverlay draws the vanilla mask texture, render modes and
 // combiners untouched, on a quad in the glass's own plane instead of a screen rect, with the mask
@@ -103,20 +107,37 @@ float GlassRadiusUnits() {
     return CmToUnits(CVarGetFloat("gVrLensRadius", 5.0f));
 }
 
-// Model scale for the real-size lens (in the hand / on the face).
+// Model scale for the real-size lens (in the hand).
 float LensScale() {
     return GlassRadiusUnits() / kGlassRadiusModel;
 }
 
-// The glass center in the head frame (+X right, +Y up, -Z forward), game units.
-void WornCenterLocal(float out[3]) {
+// On the face the lens has its own size (gVrLensWornRadius), so it can be worn bigger than it is
+// in the hand; it changes size as it goes on and comes off.
+float WornRadiusUnits() {
+    return CmToUnits(CVarGetFloat("gVrLensWornRadius", 6.2f));
+}
+
+float WornScale() {
+    return WornRadiusUnits() / kGlassRadiusModel;
+}
+
+// Putting it on is "hold it up to your face": measured against a spot no further than this in
+// front of the eyes, however far out the worn lens sits (gVrLensDistance).
+constexpr float kPutOnSpotMaxCm = 8.0f;
+
+// The glass center in the head frame (+X right, +Y up, -Z forward), game units. putOnSpot = the
+// spot the held glass is brought to (the worn spot, pulled in to kPutOnSpotMaxCm).
+void WornCenterLocal(float out[3], bool putOnSpot = false) {
+    float distanceCm = CVarGetFloat("gVrLensDistance", 8.6f);
+    if (putOnSpot && distanceCm > kPutOnSpotMaxCm) distanceCm = kPutOnSpotMaxCm;
     out[0] = CmToUnits(CVarGetFloat("gVrLensSide", 0.0f));
     out[1] = CmToUnits(CVarGetFloat("gVrLensHeight", 0.0f));
-    out[2] = -CmToUnits(CVarGetFloat("gVrLensDistance", 7.0f));
+    out[2] = -CmToUnits(distanceCm);
 }
 
 // Where the worn glass center is in the world this tick, plus the head's axes (right, up, fwd).
-bool WornCenterWorld(float out[3], float right[3], float up[3], float fwd[3]) {
+bool WornCenterWorld(float out[3], float right[3], float up[3], float fwd[3], bool putOnSpot = false) {
     if (!VR_IsInitialized()) return false;
     float eye[3];
     VR_GetCameraPose(eye, fwd, up);
@@ -124,7 +145,7 @@ bool WornCenterWorld(float out[3], float right[3], float up[3], float fwd[3]) {
     right[1] = fwd[2] * up[0] - fwd[0] * up[2];
     right[2] = fwd[0] * up[1] - fwd[1] * up[0];
     float local[3];
-    WornCenterLocal(local);
+    WornCenterLocal(local, putOnSpot);
     for (int i = 0; i < 3; ++i) out[i] = eye[i] + right[i] * local[0] + up[i] * local[1] - fwd[i] * local[2];
     return true;
 }
@@ -150,7 +171,7 @@ bool HeldGlassCenter(float out[3]) {
 void WornModelLocal(MtxF* local) {
     float center[3];
     WornCenterLocal(center);
-    const float scale = LensScale();
+    const float scale = WornScale();
     Matrix_Push();
     Matrix_Translate(center[0], center[1] - kGlassCenterYModel * scale, center[2], MTXMODE_NEW);
     Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
@@ -255,6 +276,49 @@ void RetryLens(PlayState* play) {
     if (!play->actorCtx.lensActive) sRetryCooldown = kRetryCooldownTicks;
 }
 
+// The lens is still in the loadout: on a C button (or the D-pad with DpadEquips), the same check
+// vanilla's drain makes (z_parameter.c MAGIC_STATE_CONSUME_LENS).
+bool LensOnButtons() {
+    const int count = CVarGetInteger(CVAR_ENHANCEMENT("DpadEquips"), 0) != 0
+                          ? (int)ARRAY_COUNT(gSaveContext.equips.buttonItems)
+                          : 4;
+    for (int i = 1; i < count; i++) {
+        if (gSaveContext.equips.buttonItems[i] == ITEM_LENS) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A lens on the face may stay there whatever is in hand: physical lens mode is on, the player is
+// the real player, and the lens is still equipped.
+bool WornAllowed(Player* player) {
+    return VrItemSelect_ModeActive() && CVarGetInteger("gVrPhysLens", 1) && player != nullptr &&
+           player->actor.category == ACTORCAT_PLAYER && LensOnButtons();
+}
+
+bool WornOnFace() {
+    return sState == State::Worn && gPlayState != nullptr && WornAllowed(GET_PLAYER(gPlayState));
+}
+
+// Another item owns this hand's grip right now (a bomb in it, the boomerang catch, the hammer's off
+// hand, an archery pinch): a worn lens never comes off with it (VrMask's rule).
+bool GripOwnedElsewhere(int hand) {
+    return VrItemThrow_GripConsumed(hand, VR_BTN_GRIP) || VrBoomerang_GripConsumed(hand, VR_BTN_GRIP) ||
+           VrHammer_GripConsumed(hand, VR_BTN_GRIP) || VrArchery_PinchConsumed(hand, VR_BTN_GRIP);
+}
+
+// Off the face without going into a hand (another item is selected): the lens just goes away.
+void RemoveFromFace(PlayState* play, int hand) {
+    LensOff(play);
+    sState = State::None;
+    ClearCarry();
+    sArmed = false;
+    if (hand >= 0) {
+        VR_TriggerHaptic(hand, 0.5f, 0.0f, 35.0f);
+    }
+}
+
 int StateIndex() {
     switch (sState) {
         case State::Pocket: return 1;
@@ -300,7 +364,9 @@ extern "C" void VrLens_Reset(void) {
 }
 
 extern "C" bool VrLens_PreviewIsModel(void) {
-    return sState != State::None;
+    // Worn while something else is in hand: that item's own preview / icon stands.
+    return sState != State::None && (sState != State::Worn || (gPlayState != nullptr &&
+                                                                VrLens_Covers(GET_PLAYER(gPlayState))));
 }
 
 extern "C" bool VrLens_GripConsumed(int32_t hand, uint16_t mask) {
@@ -334,10 +400,12 @@ extern "C" void VrLens_Tick(PlayState* play, Player* player) {
     sDebug.wearDistanceCm = CVarGetFloat("gVrLensWearDistance", 10.0f);
     sDebug.lensActive = play->actorCtx.lensActive ? 1 : 0;
 
+    // A lens on the face outlives the selection (WornAllowed); everything else needs it selected.
+    const bool worn = (sState == State::Worn) && WornAllowed(player);
     int gate = 0;
     if (!CVarGetInteger("gVrPhysLens", 1)) {
         gate = 1;
-    } else if (!covers) {
+    } else if (!covers && !worn) {
         gate = 2;
     } else if (!VrItemSelect_SelectionAllowed() || play->pauseCtx.state != 0 || player->unk_6AD != 0) {
         gate = 3;
@@ -360,7 +428,17 @@ extern "C" void VrLens_Tick(PlayState* play, Player* player) {
         sDebug.state = StateIndex();
         return;
     }
+    if (sState == State::Worn && gSaveContext.magic == 0) {
+        // Out of magic: the lens comes off the face (vanilla's drain already ended the reveal).
+        RemoveFromFace(play, -1);
+        Sfx_PlaySfxCentered(NA_SE_SY_GLASSMODE_OFF);
+    }
     if (sState == State::None) {
+        if (!covers) {
+            sDebug.state = StateIndex();
+            sDebug.carryHand = sCarryHand;
+            return;
+        }
         sState = State::Pocket;
         ClearCarry();
     }
@@ -376,8 +454,8 @@ extern "C" void VrLens_Tick(PlayState* play, Player* player) {
         sGripPrev[hand] = grip;
     }
     if (SwapChord() || VrItemSelect_PendingSlot() != -2) {
-        // Switching: a lens in the hand goes back to the pocket; a worn one stays on until the
-        // switch lands (the next tick's Covers drops and turns it off).
+        // Switching: a lens in the hand goes back to the pocket; a worn one stays on the face
+        // (WornAllowed), whatever the switch lands on.
         if (sState == State::Held) {
             sState = State::Pocket;
             ClearCarry();
@@ -418,7 +496,7 @@ extern "C" void VrLens_Tick(PlayState* play, Player* player) {
         if (released[hand]) {
             sState = State::Pocket;
             ClearCarry();
-        } else if (HeldGlassCenter(glass) && WornCenterWorld(face, right, up, fwd)) {
+        } else if (HeldGlassCenter(glass) && WornCenterWorld(face, right, up, fwd, true)) {
             const float wear = CmToUnits(sDebug.wearDistanceCm);
             const float dist = Distance(glass, face);
             sDebug.glassToFaceCm = dist / (0.01f * VrPocket::WorldScale());
@@ -440,8 +518,12 @@ extern "C" void VrLens_Tick(PlayState* play, Player* player) {
             const int first = SwordHandIdx();
             for (int i = 0; i < 2; ++i) {
                 const int hand = i == 0 ? first : 1 - first;
-                if (pressed[hand] && VrPocket::HandNear(hand, center)) {
-                    TakeOff(play, hand);
+                if (pressed[hand] && VrPocket::HandNear(hand, center) && (covers || !GripOwnedElsewhere(hand))) {
+                    if (covers) {
+                        TakeOff(play, hand);
+                    } else {
+                        RemoveFromFace(play, hand);
+                    }
                     break;
                 }
             }
@@ -458,10 +540,9 @@ extern "C" void VrLens_Tick(PlayState* play, Player* player) {
 // lens is worn, the mask goes on a quad in the glass's plane, glued to the head, instead of the
 // screen rects. Everything else (render mode, combiner, prim depth) is the caller's, untouched.
 extern "C" bool VrLens_DrawAperture(GraphicsContext* gfxCtx) {
-    if (sState != State::Worn || gPlayState == nullptr || gfxCtx == nullptr) return false;
-    if (!VrLens_Covers(GET_PLAYER(gPlayState))) return false;
+    if (gfxCtx == nullptr || !WornOnFace()) return false;
 
-    const float radius = GlassRadiusUnits();
+    const float radius = WornRadiusUnits();
     const float extent = kApertureExtentRadii * radius;
     float center[3];
     WornCenterLocal(center);
@@ -504,7 +585,7 @@ extern "C" bool VrLens_DrawAperture(GraphicsContext* gfxCtx) {
 extern "C" void VrLens_Draw(void) {
     if (gPlayState == nullptr || sState == State::None) return;
     Player* player = GET_PLAYER(gPlayState);
-    if (!VrLens_Covers(player)) return;
+    if (!VrLens_Covers(player) && !WornOnFace()) return;
     GraphicsContext* gfxCtx = gPlayState->state.gfxCtx;
 
     if (sState == State::Worn) {

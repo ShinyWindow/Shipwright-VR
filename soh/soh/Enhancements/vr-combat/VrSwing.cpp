@@ -12,6 +12,7 @@ MtxF* Matrix_GetCurrent(void);
 #include "soh/cvar_prefixes.h"
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <vr_interface.h>
+#include <algorithm>
 #include <cmath>
 
 // Physical melee: the sword hits because it physically swept through the target fast enough.
@@ -1083,6 +1084,51 @@ inline Vec3f SamplePt(const VrBladeSample& s, const Vec3f& local) {
     return vadd(Vec3f{ s.gripPos[0], s.gripPos[1], s.gripPos[2] }, qrot(q, local));
 }
 
+// The swing trail at headset rate. The trail (EffectBlure) records one edge per 20 Hz tick, but the
+// blade renders live, so the trail's newest edge sat up to a tick behind the blade (a 25 cm gap on a
+// fast swing) and its shape was 50 ms chords. Two parts:
+//  - SHAPE: before the tick's own edge, a few of this tick's simulated blade samples (headset rate)
+//    go in as edges too, as many as the 16-element table holds for the trail's lifetime;
+//  - HEAD: the tick's edge is remembered with the hand that drew it, and EffectBlure_Draw adds one
+//    more quad from that edge to the blade's LIVE edge, welded to the controller like the bowstring
+//    (VrCombat_TrailLiveEdge), so the trail stays attached to the blade every frame.
+struct TrailHead {
+    bool valid;
+    uint32_t frame;
+    const void* blure;
+    int hand;
+    Vec3f tip;
+    Vec3f base;
+};
+TrailHead sTrailHead = {};
+
+void FeedTrail(PlayState* play, Player* player, int hand, const VrBladeSample* samples, int n,
+               const Vec3f& tipLocal, const Vec3f& baseLocal) {
+    EffectBlure* blure = (EffectBlure*)Effect_GetByIndex(player->meleeWeaponEffectIndex);
+    if (blure == nullptr) {
+        return;
+    }
+    if (n >= 2 && CVarGetInteger("gVrTrailSubTick", 1)) {
+        // Elements live elemDuration + 1 ticks; each tick adds extra + 1.
+        int extra = 16 / (blure->elemDuration + 1) - 1;
+        extra = std::min(extra, 3);
+        extra = std::min(extra, 16 - blure->numElements - 1); // the tick's own edge always fits
+        extra = std::min(extra, n - 1);
+        for (int m = 1; m <= extra; m++) {
+            const int idx = std::clamp((m * n) / (extra + 1) - 1, 0, n - 2);
+            Vec3f t = SamplePt(samples[idx], tipLocal);
+            Vec3f b = SamplePt(samples[idx], baseLocal);
+            EffectBlure_AddVertex(blure, &t, &b);
+        }
+    }
+    const s32 before = blure->numElements;
+    EffectBlure_AddVertex(blure, &player->meleeWeaponInfo[0].tip, &player->meleeWeaponInfo[0].base);
+    if (blure->numElements > before) {
+        sTrailHead = { true, (uint32_t)play->state.frames, blure, hand, player->meleeWeaponInfo[0].tip,
+                       player->meleeWeaponInfo[0].base };
+    }
+}
+
 // The hammer's half of the melee feed (same seam, same live hand matrix). What differs from a
 // blade: the head is HEAVY — soft, torque-limited orientation springs (firm when the off hand
 // holds the handle) plus gravity droop, so it trails the hands and carries through; it never
@@ -1254,8 +1300,7 @@ void FeedHammer(PlayState* play, Player* player) {
         if (func_80090480(play, NULL, &player->meleeWeaponInfo[0], const_cast<Vec3f*>(&headOut0),
                           const_cast<Vec3f*>(&grip0)) &&
             !CVarGetInteger(CVAR_ENHANCEMENT("DisableLinkSwordTrail"), 0)) {
-            EffectBlure_AddVertex((EffectBlure*)Effect_GetByIndex(player->meleeWeaponEffectIndex),
-                                  &player->meleeWeaponInfo[0].tip, &player->meleeWeaponInfo[0].base);
+            FeedTrail(play, player, hand, sHammerPath, haveEff ? sHammerPathCount : 0, local(headOut0), local(grip0));
         }
     } else {
         player->meleeWeaponInfo[0].active = 0;
@@ -1661,13 +1706,16 @@ extern "C" void VrCombat_FeedMelee(PlayState* play, Player* player) {
         VrCombat_SetMeleeWeaponState(player, (sTier == TIER_HOT) ? 1 : -1);
     }
 
+    // This tick's simulated blade samples (drained once; the trail and the damage quads share them).
+    VrBladeSample bladePath[16];
+    const int bladeN = inertiaOn ? VR_PhysGetBladePath(VR_PHYS_SLOT_WEAPON, bladePath, 16) : 0;
+
     // ---- 4. Sword trail ----
     if (sTier != TIER_IDLE) {
         if (func_80090480(play, NULL, &player->meleeWeaponInfo[0], &tip0, &base0) &&
             !(player->stateFlags1 & PLAYER_STATE1_SHIELDING) &&
             !CVarGetInteger(CVAR_ENHANCEMENT("DisableLinkSwordTrail"), 0)) {
-            EffectBlure_AddVertex((EffectBlure*)Effect_GetByIndex(player->meleeWeaponEffectIndex),
-                                  &player->meleeWeaponInfo[0].tip, &player->meleeWeaponInfo[0].base);
+            FeedTrail(play, player, hand, bladePath, haveEff ? bladeN : 0, tipLocal0, baseLocal0);
         }
     } else {
         player->meleeWeaponInfo[0].active = 0;
@@ -1683,8 +1731,6 @@ extern "C" void VrCombat_FeedMelee(PlayState* play, Player* player) {
 
     RegisterPendingStrikes(play);
 
-    VrBladeSample bladePath[16];
-    const int bladeN = inertiaOn ? VR_PhysGetBladePath(VR_PHYS_SLOT_WEAPON, bladePath, 16) : 0;
     if (sTier == TIER_HOT) {
         const s32 held = Player_GetMeleeWeaponHeld(player);
         const int row = Player_HoldsBrokenKnife(player) ? 1 : (int)held - 1;
@@ -2041,19 +2087,6 @@ extern "C" void VrCombat_FlinchWarpBegin(PlayState* play, void* actorArg, int32_
     if (sWarpActive || actorArg == NULL) {
         return;
     }
-    // Diagnostic lever: gVrPhysFlinchTest <units> lifts EVERY enemy/NPC limb, bypassing the
-    // puppet system — splits "warp pipeline broken" from "puppet solve broken".
-    const int test = CVarGetInteger("gVrPhysFlinchTest", 0);
-    if (test != 0) {
-        Actor* a = (Actor*)actorArg;
-        if (a->category == ACTORCAT_ENEMY || a->category == ACTORCAT_NPC) {
-            MtxF* cm = Matrix_GetCurrent();
-            sWarpSavedMtx = *cm;
-            cm->yw += (float)test;
-            sWarpActive = true;
-            return;
-        }
-    }
     Puppet* p = FindPuppet((Actor*)actorArg); // pointer compare only
     if (p == nullptr || limbIndex < 0 || limbIndex >= kPuppetLimbs) {
         return;
@@ -2099,4 +2132,22 @@ extern "C" void VrCombat_FlinchWarpEnd(void) {
     }
     *Matrix_GetCurrent() = sWarpSavedMtx;
     sWarpActive = false;
+}
+
+// The live head of Link's swing trail for this frame (see TrailHead): the blure it belongs to, the
+// hand whose matrix drew the blade, and the edge recorded this tick (world units). False unless the
+// trail took an edge during this frame's draw.
+extern "C" bool VrCombat_TrailLiveEdge(const void* blure, int32_t* hand, float tip[3], float base[3]) {
+    if (!sTrailHead.valid || blure != sTrailHead.blure || gPlayState == nullptr ||
+        sTrailHead.frame != (uint32_t)gPlayState->state.frames || !CVarGetInteger("gVrTrailLiveHead", 1)) {
+        return false;
+    }
+    *hand = sTrailHead.hand;
+    tip[0] = sTrailHead.tip.x;
+    tip[1] = sTrailHead.tip.y;
+    tip[2] = sTrailHead.tip.z;
+    base[0] = sTrailHead.base.x;
+    base[1] = sTrailHead.base.y;
+    base[2] = sTrailHead.base.z;
+    return true;
 }
