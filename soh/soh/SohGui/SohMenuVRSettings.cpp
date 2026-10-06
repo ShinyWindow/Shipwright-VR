@@ -10,6 +10,7 @@
 #include <fast/vr_hud_settings.h>
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <ship/Context.h>
 #include <ship/window/gui/Gui.h>
@@ -381,6 +382,47 @@ static void VrInputBindings(WidgetInfo& info) {
     }
 }
 
+// Headset refresh rate: "Headset Default" plus exactly the rates this headset reports
+// (vr_get_supported_refresh_rates, XR_FB_display_refresh_rate). Hidden where the runtime offers no
+// choice (PC: Link / SteamVR set the rate). gVrRefreshRate is Hz, 0 = the headset's default.
+static void VrRefreshRateCombo(WidgetInfo& info) {
+    float rates[16];
+    const int n = vr_get_supported_refresh_rates(rates, 16);
+    if (n <= 0) {
+        return;
+    }
+    const int cur = CVarGetInteger("gVrRefreshRate", 0);
+    char preview[32];
+    if (cur == 0) {
+        snprintf(preview, sizeof(preview), "Headset Default");
+    } else {
+        snprintf(preview, sizeof(preview), "%d Hz", cur);
+    }
+    ImGui::TextUnformatted("Headset Refresh Rate");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (ImGui::BeginCombo("##VrRefreshRate", preview)) {
+        if (ImGui::Selectable("Headset Default", cur == 0)) {
+            CVarSetInteger("gVrRefreshRate", 0);
+            Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+        }
+        for (int i = 0; i < n; i++) {
+            const int hz = (int)(rates[i] + 0.5f);
+            char label[16];
+            snprintf(label, sizeof(label), "%d Hz", hz);
+            if (ImGui::Selectable(label, cur == hz)) {
+                CVarSetInteger("gVrRefreshRate", hz);
+                Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How often the headset's display refreshes; the game paces itself to match. "
+                          "Higher is smoother but leaves less time per frame: busy areas (Hyrule "
+                          "Field) already struggle to hold 72 on a Quest. Applies immediately.");
+    }
+}
+
 // Live frame-cost breakdown. The interesting number is "XR wait": that is time spent blocked in
 // xrWaitFrame, i.e. spare headroom. When it trends toward zero the frame no longer fits and the
 // compositor starts reprojecting.
@@ -698,11 +740,11 @@ static void VrPhysLogControl(WidgetInfo& info) {
             const char* path = "vr_phys_log.csv";
             const int32_t n = VR_PhysLogWrite(path);
             if (n > 0) {
-                char abs[MAX_PATH] = "";
-                if (_fullpath(abs, path, sizeof(abs)) == nullptr) {
-                    snprintf(abs, sizeof(abs), "%s", path);
-                }
-                snprintf(sStatus, sizeof(sStatus), "Wrote %d samples to:\n%s", n, abs);
+                std::string abs = path;
+                try {
+                    abs = std::filesystem::absolute(path).string();
+                } catch (const std::filesystem::filesystem_error&) {}
+                snprintf(sStatus, sizeof(sStatus), "Wrote %d samples to:\n%s", n, abs.c_str());
             } else if (n == 0) {
                 snprintf(sStatus, sizeof(sStatus), "Nothing captured (was the sword in hand, "
                                                    "with Physical Combat + blade inertia on?)");
@@ -1065,6 +1107,8 @@ void SohMenu::AddMenuVRSettings() {
 
     AddWidget(generalPath, "VR Mode (F9)", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrEnabled")
+        // Standalone headsets (Quest) have no flat screen: VR can't be switched off there.
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !vr_can_disable(); })
         .Options(CheckboxOptions()
                      .DefaultValue(true)
                      .Tooltip("Switch between VR and regular flat-screen play at any time - F9 does "
@@ -1074,7 +1118,7 @@ void SohMenu::AddMenuVRSettings() {
                               "connects to the headset on the spot."));
     AddWidget(generalPath, "Stay In VR When Headset Is Removed", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrStayOnDoff")
-        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrEnabled", 1); })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrEnabled", 1) || !vr_can_disable(); })
         .Options(CheckboxOptions().Tooltip(
             "By default, taking the headset off automatically drops the game to flat-screen play, "
             "and putting it back on resumes VR right where you left it. Enable this to keep "
@@ -1591,6 +1635,25 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("When you get an item and Link holds it up, it sits this much further "
                               "out from your hands (away from you), so it isn't right on top of "
                               "your head. It still follows your hands."));
+    AddWidget(gameplayPath, "Climbing", WIDGET_SEPARATOR_TEXT);
+    AddWidget(gameplayPath, "Physical Climbing", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysClimb")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Ladders, vines, climbable fences and rock: put a hand on one and squeeze its "
+                              "grip to take hold, then pull yourself along hand over hand: up, down, sideways, "
+                              "and closer to or away from the wall. Let go of everything near the top and Link "
+                              "climbs over like in the base game; let go anywhere else and you drop, keeping "
+                              "some of your swing. With no hand holding, the stick and A climb as in the base "
+                              "game. Disable for the base game's climbing only."));
+    AddWidget(gameplayPath, "Climb by Walking Into Ladders/Vines", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrClimbWalkIn")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysClimb", 1); })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Walking into a ladder or vines with the stick starts climbing by itself, as in "
+                              "the base game. Off: you take hold with your hands (walking off a ledge onto "
+                              "vines still catches you)."));
 
     // ----------------------------------------------------------- Physical Combat
     AddSidebarEntry("VR Settings", "Physical Combat", 1);
@@ -2268,6 +2331,33 @@ void SohMenu::AddMenuVRSettings() {
         .PreFunc([](WidgetInfo& info) { info.isHidden = VrHudWristLayout(); })
         .Options(FloatSliderOptions().Min(-1.5f).Max(1.5f).DefaultValue(0.0f).Step(0.02f).Format("%.2f"));
 
+    // This menu, in the headset: a panel placed in front of you when it opens (hold the left
+    // thumbstick click), pointed at with either controller (vr_openxr.cpp "SoH menu panel").
+    AddWidget(hudPath, "Settings Menu Panel", WIDGET_SEPARATOR_TEXT);
+    AddWidget(hudPath, "Menu Distance: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrMenuDistance")
+        .Options(FloatSliderOptions()
+                     .Min(0.4f)
+                     .Max(3.0f)
+                     .DefaultValue(1.0f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("How far in front of you this menu appears in the headset (hold the left "
+                              "thumbstick click to open or close it; the right one if left-handed). "
+                              "Applies the next time it opens."));
+    AddWidget(hudPath, "Menu Width: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrMenuWidth")
+        .Options(FloatSliderOptions().Min(0.4f).Max(3.0f).DefaultValue(1.2f).Step(0.05f).Format("%.2f"));
+    AddWidget(hudPath, "Menu Height: %.2f m", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrMenuHeight")
+        .Options(FloatSliderOptions()
+                     .Min(-1.0f)
+                     .Max(1.0f)
+                     .DefaultValue(-0.1f)
+                     .Step(0.01f)
+                     .Format("%.2f")
+                     .Tooltip("Panel centre relative to eye level (negative = below)."));
+
     // Text boxes (dialogue, signs, chests, item text) and the ocarina staff always get their own
     // panel that soft-follows in front of the player; only its placement is configurable. All in
     // real metres: world scale and Link's age don't change it.
@@ -2584,6 +2674,15 @@ void SohMenu::AddMenuVRSettings() {
                        "at the headset's full rate because skipped frames are reprojected by the "
                        "compositor.",
               WIDGET_TEXT);
+    AddWidget(perfPath, "VrRefreshRateCombo", WIDGET_CUSTOM).CustomFunction(VrRefreshRateCombo).HideInSearch(true);
+    AddWidget(perfPath, "High CPU Clock", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrHighCpuClock")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Asks the headset to keep its CPU clock high instead of raising it only "
+                              "after frames have already been dropped (busy areas like Hyrule Field). "
+                              "Smoother, at some battery and heat cost. Standalone Quest (and any runtime "
+                              "that supports it); does nothing elsewhere."));
     AddWidget(perfPath, "Stereo Render Divisor: %d", WIDGET_CVAR_SLIDER_INT)
         .CVar("gVrStereoDivisor")
         .Options(IntSliderOptions()
@@ -2684,7 +2783,11 @@ void SohMenu::AddMenuVRSettings() {
     AddWidget(devPath, "OpenGL: Flip Wrist/Text Crop", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrGlSubImageYUp")
         .Options(CheckboxOptions()
+#ifdef __ANDROID__
+                     .DefaultValue(true) // Quest's runtime reads GL sub-image rects bottom-left
+#else
                      .DefaultValue(false)
+#endif
                      .Tooltip("OpenGL VR only. If the wrist panels or the text panel show the wrong part of "
                               "their image (with the test card on: blue corner where red should be), toggle "
                               "this. Takes effect immediately."));
@@ -3061,24 +3164,8 @@ void SohMenu::AddMenuVRSettings() {
                      .Format("%d")
                      .Tooltip("Strength of the grab thunk, the slide rumble and the thunk of each step."));
     AddWidget(devPath, "VrBlockReadout", WIDGET_CUSTOM).CustomFunction(VrBlockReadout).HideInSearch(true);
+    // Physical Climbing and Climb by Walking In are on the Gameplay page.
     AddWidget(devPath, "Climbing", WIDGET_SEPARATOR_TEXT);
-    AddWidget(devPath, "Physical Climbing", WIDGET_CVAR_CHECKBOX)
-        .CVar("gVrPhysClimb")
-        .Options(CheckboxOptions()
-                     .DefaultValue(true)
-                     .Tooltip("Ladders, vines, climbable fences and rock: put a hand on one and squeeze its "
-                              "grip to take hold, then pull yourself along hand over hand: up, down, sideways, "
-                              "and closer to or away from the wall. Let go of everything near the top and Link "
-                              "climbs over like in the base game; let go anywhere else and you drop, keeping "
-                              "some of your swing. With no hand holding, the stick and A climb as in the base "
-                              "game. Disable for the base game's climbing only."));
-    AddWidget(devPath, "Climb by Walking Into Ladders/Vines", WIDGET_CVAR_CHECKBOX)
-        .CVar("gVrClimbWalkIn")
-        .Options(CheckboxOptions()
-                     .DefaultValue(false)
-                     .Tooltip("Walking into a ladder or vines with the stick starts climbing by itself, as in "
-                              "the base game. Off: you take hold with your hands (walking off a ledge onto "
-                              "vines still catches you)."));
     AddWidget(devPath, "Climb Grab Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrClimbGrabReach")
         .Options(FloatSliderOptions()

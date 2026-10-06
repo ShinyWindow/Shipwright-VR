@@ -61,6 +61,8 @@ u32 func_80001F8C(void);
 u32 Locale_IsRegionNative(void);
 #ifdef __WIIU__
 void _assert(const char* exp, const char* file, s32 line);
+#elif defined(__ANDROID__)
+// SOH [VR] bionic declares its own __assert(file, line, msg); the decomp calls go through macros.
 #elif defined(__linux__)
 void __assert(const char* exp, const char* file, s32 line) __THROW;
 #elif !defined(__APPLE__) && !defined(__SWITCH__) && !defined(__OpenBSD__)

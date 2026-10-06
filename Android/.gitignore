@@ -1,0 +1,9 @@
+.gradle/
+build/
+app/build/
+app/.cxx/
+local.properties
+*.apk
+*.keystore
+# The root .gitignore drops *.png; the launcher icon is source.
+!app/src/main/res/**/*.png

@@ -1,0 +1,20 @@
+// SOH [VR] Android / Meta Quest standalone build (markdowns/QUEST-PORT-PLAN.md).
+// The native code is the repo's root CMakeLists.txt; this project only packages it as an APK.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "ShipwrightVR"
+include ':app'

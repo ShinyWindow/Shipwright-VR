@@ -67,5 +67,8 @@ class Extractor {
                   std::atomic<size_t>* totalExtract);
     const char* GetZapdStr();
     std::string Mkdtemp();
+    // The text of the last error box (Android shows none: its message boxes are invisible over a
+    // VR session, so the setup panel reports this instead).
+    static std::string LastErrorText();
 };
 #endif

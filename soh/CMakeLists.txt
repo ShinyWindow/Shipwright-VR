@@ -228,7 +228,12 @@ set(ALL_FILES
 ################################################################################
 # Target
 ################################################################################
-add_executable(${PROJECT_NAME} ${ALL_FILES})
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # SOH [VR] Android: libsoh.so, loaded by SDL's Java activity, which calls SDL_main in it.
+    add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
+else()
+    add_executable(${PROJECT_NAME} ${ALL_FILES})
+endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
@@ -299,6 +304,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(dr_libs)
 
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # SOH [VR] SDL2 is a target from libultraship's android.cmake; the rest is built from source.
+    include(CMake/android-deps.cmake)
+    set(SDL2-NET-INCLUDE ${SOH_ANDROID_DEP_INCLUDES})
+else()
 find_package(SDL2)
 set(SDL2-INCLUDE ${SDL2_INCLUDE_DIRS})
 
@@ -308,6 +318,7 @@ if(NOT SDL2_net_FOUND)
     message(STATUS "SDL2_net not found (it's possible the version installed is too old).")
 else()
     set(SDL2-NET-INCLUDE ${SDL_NET_INCLUDE_DIRS})
+endif()
 endif()
 
 if (ESPEAK)
@@ -612,6 +623,11 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
                 #-fsanitize=address
             -Wl,-export-dynamic
         )
+        if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+            # SOH [VR] The decomp's C does pointer games bionic's FORTIFY aborts on; desktop
+            # Linux builds don't enable it either.
+            target_compile_options(${PROJECT_NAME} PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0)
+        endif()
     endif()
 endif()
 ################################################################################
@@ -625,7 +641,8 @@ if (CMAKE_GENERATOR MATCHES "Visual Studio")
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${CMAKE_SOURCE_DIR}/soh/assets/xml ${CMAKE_BINARY_DIR}/soh/assets/xml
     )
 endif()
-if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS")
+# (Android: the APK carries them as extractor.zip, see Android/app/build.gradle.)
+if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS|Android")
     add_custom_command(
         TARGET ${PROJECT_NAME}
         POST_BUILD
@@ -713,6 +730,19 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
     )
     target_include_directories(${PROJECT_NAME} PRIVATE
         ${DEVKITPRO}/portlibs/wiiu/include/
+    )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+    set(ADDITIONAL_LIBRARY_DEPENDENCIES
+        "libultraship;"
+        "ZAPDLib;"
+        SDL2::SDL2
+        ${SOH_ANDROID_DEP_LIBS}
+        libzip::zip
+        Threads::Threads
+        android
+        log
     )
 else()
     find_package(SDL2)

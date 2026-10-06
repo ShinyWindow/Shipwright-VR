@@ -365,25 +365,32 @@ s32 EffectBlure_Update(void* thisx) {
         this->elements[i].timer++;
     }
 
+    // VR: drain EVERY expired element, not just one. Vanilla adds one edge per tick, so at most one
+    // expires per tick and this is the same as vanilla's single removal; the VR swing trail adds
+    // several edges per tick (VrSwing FeedTrail, headset-rate samples), and removing only one per
+    // tick let the table fill to 16 and the trail live 16 ticks instead of elemDuration + 1.
     if (this->elemDuration < this->elements[0].timer) {
-        for (i = 0; i < 15; i++) {
-            this->elements[i] = this->elements[i + 1];
-        }
+        while (this->numElements > 0 && this->elements[0].state != 2 &&
+               this->elemDuration < this->elements[0].timer) {
+            for (i = 0; i < 15; i++) {
+                this->elements[i] = this->elements[i + 1];
+            }
 
-        this->elements[i].state = 2;
-        this->elements[i].p1.x = 0;
-        this->elements[i].p1.y = 0;
-        this->elements[i].p1.z = 0;
-        this->elements[i].p2.x = 0;
-        this->elements[i].p2.y = 0;
-        this->elements[i].p2.z = 0;
-        this->elements[i].flags = 0;
-        this->elements[i].timer = 0;
+            this->elements[i].state = 2;
+            this->elements[i].p1.x = 0;
+            this->elements[i].p1.y = 0;
+            this->elements[i].p1.z = 0;
+            this->elements[i].p2.x = 0;
+            this->elements[i].p2.y = 0;
+            this->elements[i].p2.z = 0;
+            this->elements[i].flags = 0;
+            this->elements[i].timer = 0;
 
-        this->numElements--;
-        if (this->numElements <= 0) {
-            this->numElements = 0;
-            return 0;
+            this->numElements--;
+            if (this->numElements <= 0) {
+                this->numElements = 0;
+                return 0;
+            }
         }
         return 0;
     }

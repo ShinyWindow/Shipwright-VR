@@ -58,6 +58,10 @@
 
 #if not defined(__SWITCH__) && not defined(__WIIU__)
 #include "Extractor/Extract.h"
+#ifdef __ANDROID__
+#include <SDL2/SDL_system.h>
+#include <SDL2/SDL_timer.h>
+#endif
 #endif
 
 #include <fast/interpreter.h>
@@ -375,6 +379,24 @@ bool PathTestCleanup(FILE* tfile) {
     return true;
 }
 
+#ifdef __ANDROID__
+// SOH [VR] Android first run (contract in Android/app/.../GameData.java). Nothing drawn over the VR
+// session is visible yet (no ImGui in the headset, Java dialogs hidden), so RunExtract makes no
+// prompts here: it converts the ROM SetupActivity imported (or one pushed with adb) on its own, and
+// on failure writes the reason where the setup panel reads it and hands back to that panel.
+static constexpr Uint32 kAndroidMsgShowSetup = 0x8001; // GameActivity.onUnhandledMessage
+
+[[noreturn]] static void AndroidSetupFailed(const std::string& dataPath, const std::string& why) {
+    SPDLOG_ERROR("[Setup] {}", why);
+    spdlog::default_logger()->flush();
+    std::ofstream(dataPath + "/setup_error.txt") << why;
+    SDL_AndroidSendMessage(kAndroidMsgShowSetup, 0);
+    for (;;) {
+        SDL_Delay(1000); // GameActivity ends this process once the setup panel is up
+    }
+}
+#endif
+
 void CheckAndCreateModFolder() {
     try {
         std::string modsPath = Ship::Context::LocateFileAcrossAppDirs("mods", appShortName);
@@ -439,6 +461,16 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
     OSFatal();
 #endif
 
+#ifdef __ANDROID__
+    // The extractor's files come out of the APK (Extractor::CallZapd); archives from an older
+    // version are regenerated from the ROM kept in the data folder, without asking.
+    std::string androidRejected;
+    if (shouldRegen) {
+        SPDLOG_INFO("[Setup] ROM archives are from an incompatible version; regenerating");
+        std::filesystem::remove(dataPath + "/oot.o2r");
+        std::filesystem::remove(dataPath + "/oot-mq.o2r");
+    }
+#else
     if (!std::filesystem::exists(installPath + "/assets")) {
         SohGui::RegisterPopup("Extractor assets not found",
                               "No O2R files found. Missing 'assets/' folder needed to generate OTR file.\nPlease "
@@ -451,6 +483,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
         std::filesystem::remove("oot.o2r");
         std::filesystem::remove("oot-mq.o2r");
     }
+#endif
 
     std::shared_ptr<BS::thread_pool> threadPool = std::make_shared<BS::thread_pool>(1);
     std::optional<std::future<void>> extractionTask;
@@ -489,6 +522,9 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
 #endif
                     std::string title =
                         !std::filesystem::exists(portArchivePath) ? "Missing soh.o2r" : "soh.o2r is outdated";
+#ifdef __ANDROID__
+                    AndroidSetupFailed(dataPath, title + ": the app's own data didn't install. Reinstall the app.");
+#endif
                     SohGui::RegisterPopup(title, msg, "OK", "", [&]() { exit(1); });
                 }
                 continue;
@@ -566,6 +602,31 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
                 break;
             }
             case ES_EXTRACT_ARGS: {
+#ifdef __ANDROID__
+                if (args.empty()) {
+                    extractStep = ES_VERIFY;
+                    continue;
+                }
+                file = args.at(0);
+                args.erase(args.begin());
+                extract = Extractor();
+                if (!extract.RunFileStandalone(file)) {
+                    // Rejected: delete it so the launcher shows the setup panel (with the reason)
+                    // instead of starting the game on it again.
+                    androidRejected = std::filesystem::path(file).filename().string() + " is not a supported ROM. " +
+                                      Extractor::LastErrorText();
+                    SPDLOG_ERROR("[Setup] {}", androidRejected);
+                    std::filesystem::remove(file);
+                } else if (!std::filesystem::exists(dataPath + "/" +
+                                                    (extract.IsMasterQuest() ? "oot-mq.o2r" : "oot.o2r"))) {
+                    SPDLOG_INFO("[Setup] Extracting game data from {}", file);
+                    extractionTask = threadPool->submit_task([&]() -> void {
+                        extract.CallZapd(installPath, dataPath, &extractCount, &totalExtract);
+                        extractCount = totalExtract = 0;
+                    });
+                }
+                continue;
+#endif
 #if !defined(__SWITCH__) && !defined(__WIIU__)
                 if (args.empty()) {
                     SohGui::RegisterPopup(
@@ -625,9 +686,13 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
                             std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs("oot.o2r", appShortName));
 
                         if (!ootO2RExists) {
+#ifdef __ANDROID__
+                            promptStep = PS_LOCAL;
+#else
                             SohGui::RegisterPopup(
                                 "No O2R Files", "No O2R files found. Generate one now?", "Yes", "No",
                                 [&]() { promptStep = PS_LOCAL; }, [&]() { exit(0); });
+#endif
                         } else {
                             extractStep = ES_VERIFY;
                         }
@@ -635,6 +700,16 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
                     }
                     case PS_LOCAL: {
                         extract = Extractor();
+#ifdef __ANDROID__
+                        // installPath == dataPath on Android: one search.
+                        extract.SetSearchPath(dataPath);
+                        extract.GetRoms(args);
+                        if (args.empty()) {
+                            AndroidSetupFailed(dataPath, "No ROM file (.z64, .n64 or .v64) in the app's folder.");
+                        }
+                        extractStep = ES_EXTRACT_ARGS;
+                        continue;
+#endif
                         extract.SetSearchPath(installPath);
                         extract.GetRoms(args);
                         extract.SetSearchPath(dataPath);
@@ -696,6 +771,11 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
                     std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs("oot.o2r", appShortName));
 
                 if (!ootO2RExists) {
+#ifdef __ANDROID__
+                    AndroidSetupFailed(dataPath, !androidRejected.empty() ? androidRejected
+                                                                         : "The ROM couldn't be converted. " +
+                                                                               Extractor::LastErrorText());
+#endif
                     SohGui::RegisterPopup("No ROM Archives",
                                           "No ROM O2R files detected. Please generate a ROM O2R and relaunch.", "OK",
                                           "", [&]() { exit(0); });
@@ -731,6 +811,9 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
                 try {
                     extractionTask->get();
                 } catch (const std::exception& e) {
+#ifdef __ANDROID__
+                    AndroidSetupFailed(dataPath, std::string("Converting the ROM crashed: ") + e.what());
+#endif
                     SohGui::RegisterPopup("Extraction Crashed", e.what(), "Close", "", []() { exit(1); });
                 }
                 extractionTask.reset();
@@ -1795,7 +1878,7 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
 
     // SOH [VR] F9 toggles between VR and flat mode. Only the REQUEST is made here (CVar flip);
     // the switch itself latches at the next game-tick boundary (VR_ApplyModeRequest in graph.c).
-    if (ImGui::IsKeyPressed(ImGuiKey_F9, false)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_F9, false) && vr_can_disable()) {
         CVarSetInteger("gVrEnabled", !CVarGetInteger("gVrEnabled", 1));
         CVarSave();
     }

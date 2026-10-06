@@ -8515,6 +8515,9 @@ void func_8084BEE4(Player* this);
 // (func_8083F360) holds him at ageProperties->unk_3C (15); here the arms set it. < 0 = not climbing
 // by hand.
 static f32 sVrClimbWallDist = -1.0f;
+// How far toward the wall the view was last allowed to run ahead of the body between ticks
+// (Player_VrClimbPublishLimits). < 0 = no limit published yet: the view follows the hand fully.
+static f32 sVrClimbViewIn = -1.0f;
 
 // The held wall's horizontal unit normal (out of the wall, toward Link).
 static s32 Player_VrClimbWallNormal(Player* this, f32 n[3]) {
@@ -8621,6 +8624,7 @@ static void Player_VrClimbHoldPose(PlayState* play, Player* this) {
     this->skelAnime.prevRot = this->actor.shape.rot.y;
     this->actor.velocity.y = 0.0f;
     this->fallStartHeight = this->actor.world.pos.y;
+    sVrClimbViewIn = -1.0f;
 }
 
 // Take hold: what func_8083EC18 does when the stick walks Link into a climbable wall, without the
@@ -8817,6 +8821,61 @@ static s32 Player_VrClimbOffEdge(PlayState* play, Player* this, CollisionPoly* p
     return true;
 }
 
+// The wall under a ladder's ledge (the ledge's own edge), straight ahead of Link just below the ledge
+// floor at topY. A ladder stands a few units proud of that wall and reaches 15 above the ledge, so the
+// ladder itself and its ladder-top strip are skipped. out = the edge wall and Link's distance from it.
+static s32 Player_VrClimbLedgeEdge(PlayState* play, Player* this, f32 topY, CollisionPoly** outPoly, s32* outBgId,
+                                   f32* outDist) {
+    f32 fx = Math_SinS(this->actor.shape.rot.y);
+    f32 fz = Math_CosS(this->actor.shape.rot.y);
+    f32 reach = this->ageProperties->unk_3C + 30.0f;
+    Vec3f from;
+    Vec3f to;
+    s32 i;
+
+    from = this->actor.world.pos;
+    from.y = topY - 2.0f;
+    to.x = this->actor.world.pos.x + fx * reach;
+    to.y = from.y;
+    to.z = this->actor.world.pos.z + fz * reach;
+    for (i = 0; i < 4; i++) {
+        Vec3f hit;
+        CollisionPoly* poly;
+        s32 bgId;
+        f32 nx;
+        f32 nz;
+        f32 len;
+        f32 dist;
+
+        if (!BgCheck_EntityLineTest1(&play->colCtx, &from, &to, &hit, &poly, true, false, false, true, &bgId)) {
+            return false;
+        }
+        if (func_80041DB8(&play->colCtx, poly, bgId) & (2 | 4)) {
+            // The ladder (or its top strip): look on from just past it.
+            from.x = hit.x + fx * 0.5f;
+            from.z = hit.z + fz * 0.5f;
+            continue;
+        }
+        nx = COLPOLY_GET_NORMAL(poly->normal.x);
+        nz = COLPOLY_GET_NORMAL(poly->normal.z);
+        len = sqrtf(SQ(nx) + SQ(nz));
+        if ((ABS(poly->normal.y) >= 600) || (len < 0.001f) || (((nx * fx) + (nz * fz)) / len > -0.5f)) {
+            return false;
+        }
+        dist = ((nx * this->actor.world.pos.x) + (nz * this->actor.world.pos.z) +
+                (COLPOLY_GET_NORMAL(poly->normal.y) * from.y) + poly->dist) /
+               len;
+        if ((dist <= 0.0f) || (dist > reach)) {
+            return false;
+        }
+        *outPoly = poly;
+        *outBgId = bgId;
+        *outDist = dist;
+        return true;
+    }
+    return false;
+}
+
 // The last hand let go. Anywhere at or above where vanilla climbs over — or within the window below
 // it — vanilla's own climb over (the hang-and-pull-up onto the ledge: climb-cliff sound, Link's voice);
 // a ladder let go right at its rung plays the ladder dismount instead. At the floor: stepping off.
@@ -8843,10 +8902,23 @@ static void Player_VrClimbRelease(PlayState* play, Player* this) {
             this->actor.world.pos.y = fireY;
             Player_SetupDismountLadder(this, this->ageProperties->unk_CC[this->av2.actionVar2 & 1], play);
         } else {
+            CollisionPoly* edgePoly = this->actor.wallPoly;
+            s32 edgeBgId = this->actor.wallBgId;
+            f32 edgeDist = this->ageProperties->unk_3C;
+
             this->actor.world.pos.y = topY;
             this->stateFlags1 &= ~PLAYER_STATE1_CLIMBING_LADDER;
-            func_8083A5C4(play, this, this->actor.wallPoly, this->ageProperties->unk_3C,
-                          &gPlayerAnim_link_normal_jump_climb_up_free);
+            // Ladders: the climb up starts 1 unit past the LEDGE's edge, as vanilla's ledge grab does
+            // (distToInteractWall from the ledge's wall). From the ladder's face it started a few units
+            // short of the edge, and the child's climb up (0.64 of the adult's carry) ended on the lip,
+            // where any nudge dropped Link back into a hang.
+            if ((this->av1.actionVar1 == 0) &&
+                Player_VrClimbLedgeEdge(play, this, topY, &edgePoly, &edgeBgId, &edgeDist)) {
+                this->actor.wallPoly = edgePoly;
+                this->actor.wallBgId = edgeBgId;
+                this->actor.wallYaw = Math_Atan2S(edgePoly->normal.z, edgePoly->normal.x);
+            }
+            func_8083A5C4(play, this, edgePoly, edgeDist, &gPlayerAnim_link_normal_jump_climb_up_free);
             this->yaw += 0x8000;
             this->actor.shape.rot.y = this->yaw;
             func_8083A9B8(this, &gPlayerAnim_link_normal_jump_climb_up_free, play);
@@ -8955,8 +9027,9 @@ static f32 Player_VrClimbRoom(PlayState* play, Player* this, f32 dx, f32 dy, f32
 // Tell the VR layer how far the view may run ahead of the body before the next tick: the room left
 // up / down / along the wall (the climbable area's edges, floor, ceiling) and toward the wall (the
 // view's 10 cm minimum). It follows the gripping hand at headset rate only that far, so pulling
-// against a limit holds still instead of overshooting and snapping back every tick.
-static void Player_VrClimbPublishLimits(PlayState* play, Player* this, const f32 n[3], f32 eyeDist, f32 minEye) {
+// against a limit holds still instead of overshooting and snapping back every tick. towardWall = how
+// far the body itself can still come in (computed by the caller).
+static void Player_VrClimbPublishLimits(PlayState* play, Player* this, const f32 n[3], f32 towardWall) {
     static const f32 kRoom = 12.0f; // more than a hand moves in one tick
     f32 tx = -n[2];
     f32 tz = n[0];
@@ -8967,9 +9040,10 @@ static void Player_VrClimbPublishLimits(PlayState* play, Player* this, const f32
     hi[0] = Player_VrClimbRoom(play, this, tx, 0.0f, tz, kRoom);
     lo[1] = Player_VrClimbRoom(play, this, 0.0f, -1.0f, 0.0f, kRoom);
     hi[1] = Player_VrClimbRoom(play, this, 0.0f, 1.0f, 0.0f, kRoom);
-    lo[2] = MAX(eyeDist - minEye, 0.0f);
+    lo[2] = MAX(towardWall, 0.0f);
     hi[2] = 1000.0f;
     VR_SetClimbViewLimits(n, lo, hi);
+    sVrClimbViewIn = lo[2];
 }
 
 // Inside the climb action, before the stick is read. False = no hand holds: the vanilla climb runs.
@@ -8983,7 +9057,10 @@ static s32 Player_VrClimbDrive(PlayState* play, Player* this) {
     f32 up[3];
     f32 along;
     f32 newDist;
+    f32 oldDist;
     f32 eyeDist;
+    f32 eyeRest;
+    f32 runAhead;
     f32 minEye;
     s32 st;
     s32 ix;
@@ -9009,6 +9086,7 @@ static s32 Player_VrClimbDrive(PlayState* play, Player* this) {
         sVrClimbWallDist = MAX(Player_VrClimbPlaneDist(this, this->actor.world.pos.x, this->actor.world.pos.y,
                                                        this->actor.world.pos.z),
                                7.0f);
+        sVrClimbViewIn = -1.0f;
     }
 
     // Along the wall vs toward / away from it.
@@ -9032,13 +9110,20 @@ static s32 Player_VrClimbDrive(PlayState* play, Player* this) {
 
     // Toward / away from the wall is the glue's distance: out as far as the arms take you; in until
     // the view is ~10 cm from the wall. The view already shows this tick's pull (it follows the
-    // gripping hand), so a view too close — from the arms or from leaning in — pushes the body back.
-    newDist = sVrClimbWallDist + along;
+    // gripping hand) — but toward the wall only as far as last tick's limit let it run ahead. Taking
+    // that out gives where the eye sits with the body where it is (eyeRest); the body comes in only
+    // as far as keeps the eye 10 cm off, and a view too close (leaning in) pushes it back. Counting
+    // the full pull as already seen moved the body in past the limit, and the next tick pushed it
+    // back out: a jitter that never got any closer.
+    oldDist = sVrClimbWallDist;
+    newDist = oldDist + along;
     VR_GetCameraPose(eye, fwd, up);
     eyeDist = Player_VrClimbPlaneDist(this, eye[0], eye[1], eye[2]);
     minEye = 10.0f * Player_VrClimbUnitsPerCm();
-    if (eyeDist < minEye) {
-        newDist += minEye - eyeDist;
+    runAhead = ((along < 0.0f) && (sVrClimbViewIn >= 0.0f)) ? MAX(along, -sVrClimbViewIn) : along;
+    eyeRest = eyeDist - runAhead;
+    if ((eyeRest + (newDist - oldDist)) < minEye) {
+        newDist = oldDist + (minEye - eyeRest);
     }
     newDist = CLAMP(newDist, 7.0f, 400.0f);
 
@@ -9084,7 +9169,10 @@ static s32 Player_VrClimbDrive(PlayState* play, Player* this) {
     }
     sVrClimbWallDist = newDist;
     if (st == 1) {
-        Player_VrClimbPublishLimits(play, this, n, MAX(eyeDist, minEye), minEye);
+        // The view may come in as far as the body can follow next tick: to the eye's 10 cm, and no
+        // closer than the body's own 7-unit minimum (past that the view slid in and snapped back).
+        Player_VrClimbPublishLimits(play, this, n,
+                                    MIN((eyeRest + (newDist - oldDist)) - minEye, newDist - 7.0f));
     }
 
     achieved[0] = this->actor.world.pos.x - base.x;

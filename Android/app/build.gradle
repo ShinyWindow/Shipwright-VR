@@ -1,0 +1,117 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The repo root (Shipwright-VR/), whose CMakeLists.txt builds libsoh.so + libSDL2.so.
+def repoRoot = file('../..')
+
+// soh.o2r (SoH's own assets + the renderer's shader templates) is built on the desktop
+// (`cmake --build build/x64 --target GenerateSohOtr`); the Quest can't run that tool chain.
+// Override with -PsohO2r=<path>.
+def sohO2r = file(project.findProperty('sohO2r') ?: "${repoRoot}/build/x64/soh/soh.o2r")
+
+// Generated APK assets: extractor.zip (the ZAPD XMLs the on-device ROM extraction reads) and
+// soh.o2r. Built from the source tree on every build, never committed.
+def generatedAssets = layout.buildDirectory.dir('generated/sohAssets')
+
+android {
+    namespace 'com.shipwrightvr.soh'
+    compileSdk 36
+    ndkVersion '27.1.12297006'
+
+    defaultConfig {
+        applicationId 'com.shipwrightvr.soh'
+        minSdk 29
+        targetSdk 32
+        versionCode 1
+        versionName '1.4-quest'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DUSE_OPENGLES=ON',
+                          '-DANDROID_STL=c++_static',
+                          '-DSDL_SHARED=ON',
+                          '-DSDL_STATIC=OFF',
+                          '-DBUILD_REMOTE_CONTROL=OFF',
+                          '-DSPDLOG_MIN_CUTOFF=SPDLOG_LEVEL_INFO'
+                targets 'soh', 'SDL2'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Sideload builds: signed with the local debug key so `adb install` takes them.
+            signingConfig signingConfigs.debug
+        }
+        debug {
+            // -O0 native code can't hold a frame rate in the headset; debug symbols still ship.
+            externalNativeBuild {
+                cmake {
+                    arguments '-DCMAKE_BUILD_TYPE=RelWithDebInfo'
+                }
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "${repoRoot}/CMakeLists.txt"
+            version '3.31.6'
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    sourceSets {
+        main {
+            assets.srcDir generatedAssets
+        }
+    }
+
+    androidResources {
+        noCompress 'o2r', 'zip'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Khronos OpenXR loader for Android (prefab: OpenXR::openxr_loader + headers for CMake).
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.63'
+}
+
+def packExtractorAssets = tasks.register('packExtractorAssets', Zip) {
+    archiveFileName = 'extractor.zip'
+    destinationDirectory = generatedAssets
+    into('assets') {
+        from "${repoRoot}/soh/assets/extractor"
+    }
+    into('assets/xml') {
+        from "${repoRoot}/soh/assets/xml"
+    }
+}
+
+def copySohArchive = tasks.register('copySohArchive', Copy) {
+    from sohO2r
+    into generatedAssets
+    doFirst {
+        if (!sohO2r.exists()) {
+            throw new GradleException("soh.o2r not found at ${sohO2r}. Build it on the desktop first " +
+                "(cmake --build build/x64 --target GenerateSohOtr) or pass -PsohO2r=<path>.")
+        }
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn packExtractorAssets, copySohArchive
+}

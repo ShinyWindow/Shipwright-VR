@@ -42,6 +42,9 @@
 #define SYSTEM_HEAP_SIZE (1024 * 1024 * 4)
 
 #ifdef __cplusplus
+// SOH [VR] extern "C++": the vr-combat modules include z64.h inside extern "C" { }, and clang
+// (Android) rejects <memory>'s templates under C linkage (MSVC lets it pass).
+extern "C++" {
 namespace LUS
 {
     class IResource;
@@ -51,6 +54,7 @@ namespace Fast {
     class DisplayList;
 };
 #include <memory>
+}
 #endif
 
 #define SCREEN_WIDTH  320

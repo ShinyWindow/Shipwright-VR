@@ -193,11 +193,43 @@ add_compile_definitions(CONTROLLERBUTTONS_T=uint32_t)
 ################################################################################
 # Sub-projects
 ################################################################################
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # SOH [VR] The NDK has no libpng; ZAPD (the on-device ROM extractor) needs it.
+    include(FetchContent)
+    set(PNG_SHARED OFF CACHE BOOL "" FORCE)
+    set(PNG_STATIC ON CACHE BOOL "" FORCE)
+    set(PNG_TESTS OFF CACHE BOOL "" FORCE)
+    set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        libpng
+        GIT_REPOSITORY https://github.com/pnggroup/libpng.git
+        GIT_TAG v1.6.43
+    )
+    FetchContent_MakeAvailable(libpng)
+    # ZAPD does find_package(PNG REQUIRED) and links PNG::PNG.
+    add_library(PNG::PNG ALIAS png_static)
+    set(PNG_FOUND TRUE)
+    set(PNG_INCLUDE_DIRS ${libpng_SOURCE_DIR} ${libpng_BINARY_DIR})
+    set(PNG_PNG_INCLUDE_DIR ${libpng_SOURCE_DIR} CACHE PATH "" FORCE)
+    set(PNG_LIBRARY png_static CACHE STRING "" FORCE)
+endif()
+
 add_subdirectory(libultraship ${CMAKE_BINARY_DIR}/libultraship)
 target_compile_options(libultraship PRIVATE "${WARNING_OVERRIDE}")
 target_compile_definitions(libultraship PUBLIC INCLUDE_MPQ_SUPPORT)
 add_subdirectory(ZAPDTR/ZAPD ${CMAKE_BINARY_DIR}/ZAPD)
 add_subdirectory(OTRExporter)
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # SOH [VR] What the desktop extractor gets from vcpkg's global include path, given to the
+    # upstream submodules' targets from here instead of patching them.
+    target_include_directories(png_static INTERFACE ${libpng_SOURCE_DIR} ${libpng_BINARY_DIR})
+    target_link_libraries(OTRExporter PUBLIC tinyxml2::tinyxml2 libzip::zip)
+    # ZAPD's crash handler calls backtrace(), which bionic only has from API 33.
+    target_sources(ZAPDLib PRIVATE ${CMAKE_SOURCE_DIR}/soh/platform/android/execinfo_compat.c)
+    target_compile_options(ZAPDLib PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-include${CMAKE_SOURCE_DIR}/soh/platform/android/execinfo_compat.h>)
+endif()
 add_subdirectory(soh)
 
 set_property(TARGET soh PROPERTY APPIMAGE_DESKTOP_FILE_TERMINAL YES)
