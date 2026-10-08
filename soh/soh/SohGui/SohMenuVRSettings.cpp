@@ -2668,8 +2668,9 @@ void SohMenu::AddMenuVRSettings() {
     WidgetPath perfPath = { "VR Settings", "Performance", SECTION_COLUMN_1 };
 
     AddWidget(perfPath, "Render Cost", WIDGET_SEPARATOR_TEXT);
-    AddWidget(perfPath, "The game's display list is walked once per eye, every frame. At 120 Hz "
-                       "that is 240 full traversals a second on one thread, plus the HUD. These "
+    AddWidget(perfPath, "The game's display list is walked once per eye, every frame (once for both "
+                       "with Single-Pass Stereo on Quest). At 120 Hz that is 240 full traversals a "
+                       "second on one thread, plus the HUD. These "
                        "settings trade world-update rate for headroom; head tracking always stays "
                        "at the headset's full rate because skipped frames are reprojected by the "
                        "compositor.",
@@ -2688,14 +2689,19 @@ void SohMenu::AddMenuVRSettings() {
         .Options(IntSliderOptions()
                      .Min(1)
                      .Max(4)
+#ifdef __ANDROID__
+                     .DefaultValue(2) // standalone: CPU-bound on the render (Fast3dWindow.cpp)
+#else
                      .DefaultValue(1)
+#endif
                      .Format("%d")
                      .Tooltip("Redraw the stereo pair every Nth frame; in between, the previous "
                               "images are resubmitted with the pose they were drawn from and the "
                               "compositor reprojects them onto your live head pose. 2 roughly "
                               "halves render cost. The source animation is 20 fps, so the drop "
                               "from 120 to 60 world updates is hard to see; head tracking is "
-                              "unaffected."));
+                              "unaffected, but your hands and held items also update at the "
+                              "lower rate. Default 2 on Quest, 1 on PC."));
     AddWidget(perfPath, "Draw HUD Once Per Game Tick", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrHudPerTick")
         .Options(CheckboxOptions()
@@ -2726,6 +2732,31 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Multiplier on the runtime's recommended per-eye resolution. This is "
                               "the GPU-side knob. Applied when the OpenXR session is created, so "
                               "it takes effect on the next restart."));
+#ifdef __ANDROID__
+    AddWidget(perfPath, "Single-Pass Stereo", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrMultiview")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Walk the game's display list once per frame and let the GPU draw both "
+                              "eyes from it (OpenGL ES multiview), instead of once per eye. Roughly "
+                              "halves the render thread's work. Takes effect the next time the game "
+                              "starts. Turn off if the image looks wrong in one eye."));
+#endif
+    AddWidget(perfPath, "Distance-Based Actor Culling", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrActorCullDistance")
+        .Options(CheckboxOptions()
+#ifdef __ANDROID__
+                     .DefaultValue(true)
+#else
+                     .DefaultValue(false)
+#endif
+                     .Tooltip("Vanilla stops drawing and updating most actors past a set depth along "
+                              "the camera's view axis, so something off to the side stays active "
+                              "further out than the same thing straight ahead, and an object can "
+                              "vanish as you turn to look at it. On: that limit is the straight-line "
+                              "distance from your head, the same in every direction. Fewer actors "
+                              "run at once (cheaper), but enemies and objects far off to your sides "
+                              "pause sooner than in vanilla. Default on for Quest, off on PC."));
 
     perfPath.column = SECTION_COLUMN_2;
     AddWidget(perfPath, "Live Frame Cost", WIDGET_SEPARATOR_TEXT);

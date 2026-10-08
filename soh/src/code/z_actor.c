@@ -3045,6 +3045,27 @@ void Actor_DrawLensActors(PlayState* play, s32 numInvisibleActors, Actor** invis
     CLOSE_DISPS(gfxCtx);
 }
 
+// SOH [VR] The cull volume's forward limit is depth along the camera's view axis, so an actor off to
+// the side (less depth) stays active further out than one straight ahead, and can vanish as the
+// player turns to look at it: invisible on a TV, obvious with a turnable head. With
+// gVrActorCullDistance (Performance page; default on for Quest) the limit is the straight-line
+// distance from the camera eye instead: the same in every direction, and fewer actors active at
+// once. The cull test gates actor UPDATE as well as draw, so this is a gameplay change (actors far
+// off to the side pause sooner), hence the setting. Only when the test is about the actor's own
+// position (EnHorse tests other points through the same function).
+static f32 Actor_CullForwardDepth(PlayState* play, Actor* actor, Vec3f* projectedPos) {
+#ifdef __ANDROID__
+    const s32 kDefault = 1;
+#else
+    const s32 kDefault = 0;
+#endif
+    if (projectedPos == &actor->projectedPos && VR_IsInitialized() &&
+        CVarGetInteger("gVrActorCullDistance", kDefault)) {
+        return Math_Vec3f_DistXYZ(&play->view.eye, &actor->world.pos);
+    }
+    return projectedPos->z;
+}
+
 s32 Actor_CullingCheck(PlayState* play, Actor* actor) {
     return Actor_CullingVolumeTest(play, actor, &actor->projectedPos, actor->projectedW);
 }
@@ -3052,7 +3073,8 @@ s32 Actor_CullingCheck(PlayState* play, Actor* actor) {
 s32 Actor_CullingVolumeTest(PlayState* play, Actor* actor, Vec3f* arg2, f32 arg3) {
     f32 var;
 
-    if ((arg2->z > -actor->uncullZoneScale) && (arg2->z < (actor->uncullZoneForward + actor->uncullZoneScale))) {
+    if ((arg2->z > -actor->uncullZoneScale) &&
+        (Actor_CullForwardDepth(play, actor, arg2) < (actor->uncullZoneForward + actor->uncullZoneScale))) {
         var = (arg3 < 1.0f) ? 1.0f : 1.0f / arg3;
 
         if ((((fabsf(arg2->x) - actor->uncullZoneScale) * var) < 1.0f) &&
