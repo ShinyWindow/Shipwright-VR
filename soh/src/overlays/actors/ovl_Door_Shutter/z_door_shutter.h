@@ -56,6 +56,10 @@ typedef struct DoorShutter {
     /* 0x016F */ s8 actionTimer;
     /* 0x0170 */ f32 barsClosedAmount;
     /* 0x0174 */ DoorShutterActionFunc actionFunc;
-} DoorShutter; // size = 0x0178
+    // VR keeps both immutable room-side visuals resolved for the actor's full lifetime. Resource
+    // packs may replace either underlying display list, but gameplay never remaps the materials.
+    /* 0x0178 */ u8 vrGfxTypeBySide[2];
+    /* 0x017A */ u8 vrGfxCacheValid;
+} DoorShutter; // size = 0x017C
 
 #endif

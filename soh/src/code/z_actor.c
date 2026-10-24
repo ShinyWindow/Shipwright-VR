@@ -1764,6 +1764,12 @@ void Actor_UpdateBgCheckInfo(PlayState* play, Actor* actor, f32 wallCheckHeight,
         }
     }
 
+    // SOH [VR] The physical doorway aperture removes the original closed-plane response, then this
+    // restores solidity at the door leaf's actual rotated position so Link must walk around it.
+    if (actor->category == ACTORCAT_PLAYER) {
+        VrDoor_ConstrainPlayerToLeaf(actor);
+    }
+
     sp64.x = actor->world.pos.x;
     sp64.z = actor->world.pos.z;
 
@@ -3228,7 +3234,8 @@ void Actor_DrawAll(PlayState* play, ActorContext* actorCtx) {
                     // #endregion
                     if ((actor->flags & ACTOR_FLAG_REACT_TO_LENS) &&
                         ((play->roomCtx.curRoom.lensMode == LENS_MODE_HIDE_ACTORS) || play->actorCtx.lensActive ||
-                         (actor->room != play->roomCtx.curRoom.num))) {
+                         ((actor->room != play->roomCtx.curRoom.num) &&
+                          !(VrDoor_KeepPreviousRoomActors() && actor->room == play->roomCtx.prevRoom.num)))) {
                         assert(invisibleActorCounter < INVISIBLE_ACTOR_MAX);
                         invisibleActors[invisibleActorCounter] = actor;
                         invisibleActorCounter++;

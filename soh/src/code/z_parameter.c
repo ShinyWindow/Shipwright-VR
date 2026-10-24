@@ -22,6 +22,7 @@
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/gameplaystats.h"
 #include "soh/ObjectExtension/ActorMaximumHealth.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #include "message_data_static.h"
 #include <vr_interface.h> // SOH [VR] HUD element markers
@@ -5351,16 +5352,38 @@ void Interface_Draw(PlayState* play) {
                                 PosY_SKC = PosY_SKC_ori;
                                 PosX_SKC = PosX_SKC_ori;
                             }
-                            // Small Key Icon
-                            Interface_VrHudGroup(play, VR_HUD_EL_KEYS, interfaceCtx->magicAlpha); // SOH [VR]
+                            const s32 physicalKeys = VR_IsInitialized() && CVarGetInteger("gVrPhysicalKeys", 1);
+                            // In VR the Small Key is a full 32x32 item icon, matching the Boss Key.
+                            // Its enlarged counter is overlaid in the lower-right so it does not
+                            // widen the measured card or push the two key cards off-centre.
+                            Interface_VrHudGroup(play, physicalKeys ? VR_HUD_EL_PHYSICAL_KEYS : VR_HUD_EL_KEYS,
+                                                 interfaceCtx->magicAlpha); // SOH [VR]
                             gDPPipeSync(OVERLAY_DISP++);
-
-                            gDPSetPrimColor(OVERLAY_DISP++, 0, 0, keyCountColor.r, keyCountColor.g, keyCountColor.b,
-                                            interfaceCtx->magicAlpha);
-                            gDPSetEnvColor(OVERLAY_DISP++, 0, 0, 20,
-                                           255); // We reset this here so it match user color :)
-                            OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, gSmallKeyCounterIconTex, 16, 16, PosX_SKC,
-                                                          PosY_SKC, 16, 16, 1 << 10, 1 << 10);
+                            if (physicalKeys) {
+                                PosX_SKC = 26;
+                                PosY_SKC = 184;
+                                gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
+                                const s32 keyHighlighted = VrKeys_HudHighlighted(0);
+                                gDPSetPrimColor(OVERLAY_DISP++, 0, 0, keyHighlighted ? 255 : 165,
+                                                keyHighlighted ? 255 : 165, keyHighlighted ? 255 : 165,
+                                                keyHighlighted ? interfaceCtx->magicAlpha
+                                                               : interfaceCtx->magicAlpha * 185 / 255);
+                                // Dungeon inventory icons are authored at 24x24 (unlike ordinary
+                                // 32x32 item icons). Loading 32x32 read past the vanilla resource
+                                // and appeared corrupted; some HD replacements happened to mask it.
+                                gDPLoadTextureBlock(OVERLAY_DISP++, gItemIcons[ITEM_KEY_SMALL], G_IM_FMT_RGBA,
+                                                    G_IM_SIZ_32b, 24, 24, 0, G_TX_NOMIRROR | G_TX_CLAMP,
+                                                    G_TX_NOMIRROR | G_TX_CLAMP, 5, 5, G_TX_NOLOD, G_TX_NOLOD);
+                                gSPWideTextureRectangle(OVERLAY_DISP++, PosX_SKC << 2, PosY_SKC << 2,
+                                                        (PosX_SKC + 32) << 2, (PosY_SKC + 32) << 2,
+                                                        G_TX_RENDERTILE, 0, 0, (24 << 10) / 32, (24 << 10) / 32);
+                            } else {
+                                gDPSetPrimColor(OVERLAY_DISP++, 0, 0, keyCountColor.r, keyCountColor.g,
+                                                keyCountColor.b, interfaceCtx->magicAlpha);
+                                gDPSetEnvColor(OVERLAY_DISP++, 0, 0, 20, 255);
+                                OVERLAY_DISP = Gfx_TextureIA8(OVERLAY_DISP, gSmallKeyCounterIconTex, 16, 16,
+                                                              PosX_SKC, PosY_SKC, 16, 16, 1 << 10, 1 << 10);
+                            }
 
                             // Small Key Counter
                             gDPPipeSync(OVERLAY_DISP++);
@@ -5376,22 +5399,47 @@ void Interface_Draw(PlayState* play) {
                                 interfaceCtx->counterDigits[3] -= 10;
                             }
 
-                            svar3 = 16;
+                            svar3 = physicalKeys ? 22 : 16;
                             if (interfaceCtx->counterDigits[2] != 0) {
                                 OVERLAY_DISP = Gfx_TextureI8(
                                     OVERLAY_DISP, ((u8*)((u8*)digitTextures[interfaceCtx->counterDigits[2]])), 8, 16,
-                                    PosX_SKC + 16, PosY_SKC, 8, 16, 1 << 10, 1 << 10);
-                                svar3 = 24;
+                                    PosX_SKC + (physicalKeys ? 12 : 16), PosY_SKC + (physicalKeys ? 12 : 0),
+                                    physicalKeys ? 10 : 8, physicalKeys ? 20 : 16,
+                                    physicalKeys ? (8 << 10) / 10 : 1 << 10,
+                                    physicalKeys ? (16 << 10) / 20 : 1 << 10);
+                                svar3 = physicalKeys ? 22 : 24;
                             }
 
                             OVERLAY_DISP =
                                 Gfx_TextureI8(OVERLAY_DISP, ((u8*)digitTextures[interfaceCtx->counterDigits[3]]), 8, 16,
-                                              PosX_SKC + svar3, PosY_SKC, 8, 16, 1 << 10, 1 << 10);
+                                              PosX_SKC + svar3, PosY_SKC + (physicalKeys ? 12 : 0),
+                                              physicalKeys ? 10 : 8, physicalKeys ? 20 : 16,
+                                              physicalKeys ? (8 << 10) / 10 : 1 << 10,
+                                              physicalKeys ? (16 << 10) / 20 : 1 << 10);
                         }
                         break;
                     default:
                         break;
                 }
+            }
+
+            // SOH [VR] Boss Key is a separate wrist-HUD element so its visible icon is also its
+            // exact physical grab target. The wrist packer places it beside the Small Key card.
+            if (VR_IsInitialized() && CVarGetInteger("gVrPhysicalKeys", 1) &&
+                VrKeys_BossAvailable(play)) {
+                Interface_VrHudGroup(play, VR_HUD_EL_PHYSICAL_BOSS_KEY, interfaceCtx->magicAlpha);
+                gDPPipeSync(OVERLAY_DISP++);
+                gDPSetCombineMode(OVERLAY_DISP++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
+                const s32 bossKeyHighlighted = VrKeys_HudHighlighted(1);
+                gDPSetPrimColor(OVERLAY_DISP++, 0, 0, bossKeyHighlighted ? 255 : 165,
+                                bossKeyHighlighted ? 255 : 165, bossKeyHighlighted ? 255 : 165,
+                                bossKeyHighlighted ? interfaceCtx->magicAlpha
+                                                   : interfaceCtx->magicAlpha * 185 / 255);
+                gDPLoadTextureBlock(OVERLAY_DISP++, gItemIcons[ITEM_KEY_BOSS], G_IM_FMT_RGBA, G_IM_SIZ_32b,
+                                    24, 24, 0, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP,
+                                    5, 5, G_TX_NOLOD, G_TX_NOLOD);
+                gSPWideTextureRectangle(OVERLAY_DISP++, 72 << 2, 184 << 2, 104 << 2, 216 << 2,
+                                        G_TX_RENDERTILE, 0, 0, (24 << 10) / 32, (24 << 10) / 32);
             }
 
             if (GameInteractor_Should(VB_RENDER_RUPEE_COUNTER, true)) {

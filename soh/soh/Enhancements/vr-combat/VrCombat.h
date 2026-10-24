@@ -141,6 +141,10 @@ int32_t VrCombat_ShieldBlockJudge(struct Player* player);
 // True when the given VR input on the given hand is DEDICATED to the selector — padmgr skips
 // that input's normal button binding so the opening click never leaks its bound action.
 bool VrItemSelect_ConsumesInput(int32_t vrHand, uint16_t vrBtnMask);
+// On horseback the selector cannot open. Returns true once on each press of its configured
+// input, allowing the player item layer to toggle the bow directly instead.
+bool VrItemSelect_TakeHorseBowToggle(void);
+bool VrItemSelect_HorseBowEnabled(void);
 
 // SELECTOR MODE (gVrItemSelect on, VR first person): the selector equips and the TRIGGER of the
 // hand the item ended up in uses it, replacing "press the C button you assigned it to".
@@ -214,8 +218,12 @@ bool VrOcarina_InPlay(void);
 // the one-hand aim ray). Reset clears transient nock state.
 bool VrArchery_Covers(struct Player* player);
 uint16_t VrArchery_ItemButtonMask(void);
+bool VrArchery_GalleryOwnsWeapon(void);
 bool VrArchery_PinchConsumed(int32_t vrHand, uint16_t vrBtnMask);
 bool VrArchery_AimSegment(float* outPosDir6);
+// Consumes the exact two-hand line captured for a released physical bow shot. Unlike the
+// render-time AimSegment window, this remains valid until the delayed arrow actually launches.
+bool VrArchery_TakeReleasedAim(float* outPosDir6);
 void VrArchery_Reset(void);
 // Fairy Bow profile (geometry read off the bow model, as the slingshot's pouch is).
 // BowStringNock: world point the drawn bowstring's apex belongs at (string hand, capped at max
@@ -232,6 +240,9 @@ bool VrArchery_BowAlignedMatrix(int32_t vrHand, float* mf16);
 // NockedArrowHand: the VR hand the nocked arrow is welded to (the bow hand, like the string)
 // while a bow nock is drawn; -1 otherwise (the arrow draws exactly as vanilla).
 int32_t VrArchery_NockedArrowHand(void);
+// Same answer, but only when `arrow` is the exact projectile currently held by the player.
+// Elemental child effects use this so an older arrow in flight is never welded to a new nock.
+int32_t VrArchery_NockedArrowHandForActor(struct Actor* arrow);
 
 // Physical bottle scooping (VrBottle.cpp — selector mode): an EMPTY bottle catches by
 // moving its MOUTH (bottle-hand controller + grip-local offset) into a catchable's volume — no
@@ -559,6 +570,106 @@ typedef struct VrBlockDebug {
     int32_t lastRelease; // -1 none yet, 0 grip opened, 1 pulled off, 2 Link left the grab
 } VrBlockDebug;
 void VrBlock_GetDebug(VrBlockDebug* out);
+
+// Physical handle doors (VrDoor.cpp, gVrPhysicalDoors). Ordinary unlocked En_Door actors only.
+// A fresh normal VR grab near the handle latches one hand. Turning that hand about the door normal
+// releases the latch; its horizontal position then drives the leaf around the hinge until released.
+// Returns true while the module owns the actor, so EnDoor_Idle does not run the vanilla animation.
+struct EnDoor;
+bool VrDoor_Tick(struct EnDoor* door, struct PlayState* play);
+bool VrDoor_GripConsumed(int32_t hand, uint16_t mask);
+// Jabu-Jabu's unbarred radial flesh shutter reuses shutter hover/palm pinning, but opens completely
+// from a single hand grip with no lift gesture. The native actor retains its opening/closing animation.
+struct DoorShutter;
+bool VrJabuDoor_Tick(struct DoorShutter* door, struct PlayState* play);
+void VrJabuDoor_Cancel(struct DoorShutter* door, struct PlayState* play);
+bool VrJabuDoor_GripConsumed(int32_t hand, uint16_t mask);
+// An unlocked, fully unbarred rigid shutter can be gripped with both hands and physically lifted in VR.
+// This covers Boss Doors and ordinary dungeon shutters; Jabu and special encounter blockers are excluded.
+// 0 = inactive, 1 = owns the door/grips, 2 = fully raised.
+int32_t VrShutter_Tick(struct DoorShutter* door, struct PlayState* play);
+bool VrShutter_GripConsumed(int32_t hand, uint16_t mask);
+// While hovering or latched, the hand is rendered as a bare open palm instead of its equipped item.
+bool VrShutter_HoldsHand(int32_t hand);
+bool VrShutter_KeepOpen(struct DoorShutter* door, struct PlayState* play);
+bool VrShutter_IsPhysicalClosePending(struct DoorShutter* door);
+int32_t VrShutter_GetPhysicalCloseRoom(struct DoorShutter* door, struct PlayState* play);
+bool VrShutter_GetClosingRenderFlipped(const struct DoorShutter* door, bool* flipped);
+// Completes a cancelled physical shutter's room rollback only after the slab reaches fully closed.
+void VrShutter_FinishClose(struct DoorShutter* door, struct PlayState* play);
+bool VrShutter_ConsumePhysicalClose(struct DoorShutter* door);
+bool VrShutter_ConsumePreservedEntryUnlock(struct DoorShutter* door);
+float VrShutter_OpenHeight(struct DoorShutter* door);
+bool VrShutter_PinnedHandMatrix(struct Player* player, int32_t hand, float* mf16);
+// Returns the OTR display-list path for the rigid slab selected by Door_Shutter.
+const char* VrShutter_GetDisplayListPath(const struct DoorShutter* door);
+bool VrShutter_RenderFlipped(const struct DoorShutter* door, const struct PlayState* play);
+// Suppresses only the player's wall sweep inside the centre of a sufficiently open physical doorway.
+bool VrDoor_AllowsWallPass(struct Actor* actor, const float* nextPos3, const float* prevPos3);
+// Replaces the removed closed-door wall with a player-only collider along the rotated physical leaf.
+void VrDoor_ConstrainPlayerToLeaf(struct Actor* actor);
+// During physical-door streaming, room object banks are merged so prevRoom actors keep their assets.
+bool VrDoor_KeepPreviousRoomActors(void);
+// True only around the Room_RequestNewRoom call made by a physical VR doorway.
+bool VrDoor_IsPhysicalRoomRequest(void);
+int32_t VrDoor_EnvironmentBehaviorType2(struct PlayState* play);
+// Supplies a stable virtual viewpoint for EnDoor's front/back display-list choice near the leaf.
+bool VrDoor_StableFaceView(struct EnDoor* door, float* outPos3);
+bool VrDoor_IsPhysicalActive(struct EnDoor* door);
+// While a handle is held, pin the rendered hand to the point it took hold on the moving leaf.
+// The physical controller continues to drive the door, but cannot visually stretch away from it.
+bool VrDoor_PinnedHandMatrix(struct Player* player, int32_t hand, float* mf16);
+
+// Gerudo Fortress cell grates use their own actor but share the two-hand vertical-lift language
+// of physical shutters. -1 means the original non-VR path should run; 2 commits the open state.
+struct DoorGerudo;
+int32_t VrGerudoDoor_Tick(struct DoorGerudo* door, struct PlayState* play);
+bool VrGerudoDoor_GripConsumed(int32_t hand, uint16_t mask);
+bool VrGerudoDoor_HoldsHand(int32_t hand);
+bool VrGerudoDoor_PinnedHandMatrix(struct Player* player, int32_t hand, float* mf16);
+
+// Physical treasure chests (VrChest.cpp, gVrPhysicalChests). Both hands must grip anywhere across
+// the front lip opposite the hinge and lift together; reaching the fully open angle commits the
+// ordinary chest reward transaction. The stock path remains untouched outside first-person VR.
+struct EnBox;
+struct GetItemEntry;
+// 0 = inactive, 1 = hovering/holding/physically opening, 2 = reached fully open this tick.
+int32_t VrChest_Tick(struct EnBox* chest, struct PlayState* play);
+// Captures the exact model matrix used to draw lid limb 3, allowing hover placement to use the
+// rendered mesh rather than duplicating the chest skeleton transform.
+void VrChest_RecordLidMatrix(struct EnBox* chest, const float* mf16);
+bool VrChest_GripConsumed(int32_t hand, uint16_t mask);
+bool VrChest_HoldsHand(int32_t hand);
+bool VrChest_PinnedHandMatrix(struct Player* player, int32_t hand, float* mf16);
+bool VrChest_OpenRequested(struct EnBox* chest);
+void VrChest_ConsumeOpenRequest(struct EnBox* chest);
+// The physical path runs the ordinary reward transaction in the background so Link retains
+// locomotion. These calls keep the already-visible chest item alive for that entire transaction.
+void VrChest_AwardStarted(struct EnBox* chest, const struct GetItemEntry* entry);
+void VrChest_AwardFinished(struct EnBox* chest);
+bool VrChest_AwardActive(void);
+// Repositions the normal get-item model over the opened chest. `out` is the reference point used
+// by Player_DrawGetItemImpl, so the caller's normal 14-unit vertical offset still applies.
+bool VrChest_GetItemHoldUpPos(struct PlayState* play, struct Player* player, float* out);
+// Draws the single item model while it is inside/rising from the chest and throughout the reward.
+void VrChest_DrawItem(struct EnBox* chest, struct PlayState* play);
+// Physical dungeon keys (VrKeys.cpp). Two-dimensional inventory icons on the left wrist can be
+// grabbed to create a held key; compatible vanilla locks remain responsible for consuming it.
+void VrKeys_Tick(struct PlayState* play, struct Player* player);
+bool VrKeys_GripConsumed(int32_t hand, uint16_t mask);
+bool VrKeys_HoldsHand(int32_t hand);
+// True while the grabbing hand is inside this wrist key's visible card (bossKey: 0 small, 1 boss).
+bool VrKeys_HudHighlighted(int32_t bossKey);
+// True when the current dungeon's Boss Key is owned, for persistent wrist-HUD visibility.
+// Physical spawning remains restricted to a nearby, still-locked Boss Door in VrKeys_Tick.
+bool VrKeys_BossAvailable(struct PlayState* play);
+void VrKeys_Reset(void);
+// Returns true after the held physical key has been aligned with and pushed through this lock.
+struct EnDoor;
+struct DoorShutter;
+bool VrKeys_TryEnDoor(struct EnDoor* door, struct PlayState* play);
+bool VrKeys_TryShutter(struct DoorShutter* door, struct PlayState* play);
+bool VrKeys_TryGerudoDoor(struct DoorGerudo* door, struct PlayState* play);
 // Small body collider (VrBody.cpp, gVrSmallBody — VR first person with roomscale). Link's body keeps
 // the vanilla wall radius for everything; the view (and the hands on the same anchor) is a small
 // circle (gVrSmallBodyRadiusCm) living inside that big circle, so it can get closer to walls than the

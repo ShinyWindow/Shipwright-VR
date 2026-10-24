@@ -5,6 +5,7 @@
  */
 
 #include "z_en_mag.h"
+#include <fast/vr_benchmark.h>
 #include "objects/object_mag/object_mag.h"
 #include <soh/GameVersions.h>
 #include "soh/ResourceManagerHelpers.h"
@@ -62,6 +63,8 @@ static s16 sDelayTimer = 0;
 void EnMag_Init(Actor* thisx, PlayState* play) {
     EnMag* this = (EnMag*)thisx;
     bool isMQ = ResourceMgr_IsGameMasterQuest();
+
+    vr_benchmark_title_intro_begin();
 
     YREG(1) = 63;
     YREG(3) = 80;
@@ -323,6 +326,7 @@ void EnMag_Update(Actor* thisx, PlayState* play) {
         }
     } else if (this->globalState == MAG_STATE_DISPLAY) {
         if (Flags_GetEnv(play, 4)) {
+            vr_benchmark_title_intro_end();
             this->globalState = MAG_STATE_FADE_OUT;
         }
     }

@@ -940,7 +940,7 @@ s32 Player_GetEnvironmentalHazard(PlayState* play) {
     TextTriggerEntry* triggerEntry;
     s32 envHazard;
 
-    if (play->roomCtx.curRoom.behaviorType2 == ROOM_BEHAVIOR_TYPE2_3) { // Room is hot
+    if (VrDoor_EnvironmentBehaviorType2(play) == ROOM_BEHAVIOR_TYPE2_3) { // Room is hot
         envHazard = PLAYER_ENV_HAZARD_HOTROOM - 1;
     } else if ((this->underwaterTimer > 80) &&
                ((this->currentBoots == PLAYER_BOOTS_IRON) || (this->underwaterTimer >= 300))) { // Deep underwater
@@ -1474,6 +1474,10 @@ s32 Player_OverrideLimbDrawGameplayDefault(PlayState* play, s32 limbIndex, Gfx**
         *dList = NULL;
     }
 
+    // Anchor VR extension: dummy players stay on this normal full-body path, but their transmitted
+    // headset/controller matrices replace the head and hand limb poses when available.
+    Anchor_ApplyRemoteVrLimbPose(this, limbIndex);
+
     return false;
 }
 
@@ -1568,7 +1572,9 @@ s32 Player_VrWeldMtxToHand(PlayState* play, const void* mtx, s32 vrHand, const f
     MtxF vrLocal;
     MtxF vrCur;
 
-    if (!(VR_IsInitialized() && VR_GetFirstPerson()) || (vrHand != VR_HAND_LEFT && vrHand != VR_HAND_RIGHT) ||
+    Player* player = GET_PLAYER(play);
+    if (!(VR_IsInitialized() && (VR_GetFirstPerson() || VrArchery_Covers(player))) ||
+        (vrHand != VR_HAND_LEFT && vrHand != VR_HAND_RIGHT) ||
         (sVrHandLimbFrame[vrHand] != (s32)play->state.frames)) {
         return false;
     }
@@ -1630,6 +1636,20 @@ s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex,
             // dominant hand (VrHookshot_RightLimbHand swaps the limbs); L_HAND takes the other.
             s32 rightLimbVr = VrHookshot_RightLimbHand(this);
             s32 vrHand = (limbIndex == PLAYER_LIMB_R_HAND) ? rightLimbVr : (rightLimbVr ^ 1);
+            s32 vrShutterPalm = VrShutter_HoldsHand(vrHand);
+            s32 vrGerudoDoorPalm = VrGerudoDoor_HoldsHand(vrHand);
+            s32 vrChestPalm = VrChest_HoldsHand(vrHand);
+            // A physical dungeon key is held in a visibly closed fist. The shutter open-palm model
+            // is chosen below only after that exact shutter state successfully supplies the pin.
+            if (VrKeys_HoldsHand(vrHand)) {
+                if (limbIndex == PLAYER_LIMB_L_HAND) {
+                    *dList = ResourceMgr_LoadGfxByName(
+                        gPlayerLeftHandClosedDLs[gSaveContext.linkAge + sDListsLodOffset]);
+                } else {
+                    *dList = ResourceMgr_LoadGfxByName(
+                        sPlayerRightHandClosedDLs[gSaveContext.linkAge + sDListsLodOffset]);
+                }
+            }
             // Default (right-handed) maps each controller to Link's OPPOSITE-side hand model; the
             // reflection that flips a mesh's handedness is per hand because it also mirrors held
             // items' face designs — the sword survives that, but the shield's crest reads as
@@ -1659,7 +1679,28 @@ s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex,
                 // never substituted with the live controller.
                 // A hand latched on a silver boulder rides it the same way (VrCarry).
                 s32 vrPinned = VrBlock_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]) ||
-                               VrCarry_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]);
+                               VrCarry_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]) ||
+                               VrDoor_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]);
+                s32 vrChestPinned = !vrPinned && vrChestPalm &&
+                                    VrChest_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]);
+                vrPinned = vrPinned || vrChestPinned;
+                s32 vrGerudoDoorPinned = !vrPinned && vrGerudoDoorPalm &&
+                                         VrGerudoDoor_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]);
+                vrPinned = vrPinned || vrGerudoDoorPinned;
+                s32 vrShutterPinned = !vrPinned && vrShutterPalm &&
+                                      VrShutter_PinnedHandMatrix(this, vrHand, &handMtx.mf[0][0]);
+                vrPinned = vrPinned || vrShutterPinned;
+                if (vrChestPinned || vrGerudoDoorPinned || vrShutterPinned) {
+                    // Physical surface poses rebuild a positive-determinant matrix, so draw the
+                    // native anatomical mesh for the controller with normal culling.
+                    if (vrHand == VR_HAND_LEFT) {
+                        *dList = ResourceMgr_LoadGfxByName(
+                            gPlayerLeftHandOpenDLs[gSaveContext.linkAge + sDListsLodOffset]);
+                    } else {
+                        *dList = ResourceMgr_LoadGfxByName(
+                            sPlayerRightHandOpenDLs[gSaveContext.linkAge + sDListsLodOffset]);
+                    }
+                }
                 s32 vrBowAligned = !vrPinned && VrArchery_BowAlignedMatrix(vrHand, &handMtx.mf[0][0]);
                 // SOH [VR] Climbing (VrClimb): a holding hand is drawn on the surface where it took
                 // hold — a fixed offset from the controller, still live (welded as a child below).
@@ -1695,7 +1736,7 @@ s32 Player_OverrideLimbDrawGameplayVRFirstPerson(PlayState* play, s32 limbIndex,
                 }
                 pos->x = pos->y = pos->z = 0.0f;
                 rot->x = rot->y = rot->z = 0;
-                if (mirror) {
+                if (mirror && !vrShutterPinned) {
                     // The reflection flips triangle winding; invert back-face culling so the hand + held
                     // item don't render inside-out. Cleared on the next limb (top of this function).
                     OPEN_DISPS(play->state.gfxCtx);
@@ -2041,7 +2082,8 @@ Vec3f sLeftRightFootLimbModelFootPos[] = {
 // is the exception: it rides the dominant hand (VrHookshot_RightLimbHand), and aims from there.
 // Returns true when it overrode the actor's transform.
 static s32 Player_VrAimHeldProjectile(Player* this, Actor* heldActor) {
-    if (!(VR_IsInitialized() && VR_GetFirstPerson() && CVarGetInteger("gVrMotionHands", 1) &&
+    if (!(VR_IsInitialized() && (VR_GetFirstPerson() || VrArchery_Covers(this)) &&
+          CVarGetInteger("gVrMotionHands", 1) &&
           CVarGetInteger("gVrWeaponAim", 1))) {
         return false;
     }
@@ -2260,7 +2302,15 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
             Matrix_Push();
             Matrix_Translate(stringData->pos.x, stringData->pos.y, stringData->pos.z, MTXMODE_APPLY);
 
-            if ((this->stateFlags1 & PLAYER_STATE1_READY_TO_FIRE) && (this->unk_860 >= 0) && (this->unk_834 <= 10)) {
+            // The gallery's stock aim state keeps the band visually pulled before physical
+            // archery has nocked it. Its real touch target is still the braced pouch, producing
+            // two different apparent nock points. Leave the gallery slingshot braced until the
+            // physical pouch transform below takes ownership.
+            s32 vrPhysicalGallerySling = stringData == &sBowStringData[1] && play->shootingGalleryStatus > 0 &&
+                                         VrArchery_Covers(this);
+
+            if (!vrPhysicalGallerySling && (this->stateFlags1 & PLAYER_STATE1_READY_TO_FIRE) &&
+                (this->unk_860 >= 0) && (this->unk_834 <= 10)) {
                 Vec3f sp90;
                 f32 distXYZ;
 
@@ -2336,7 +2386,7 @@ void Player_PostLimbDrawGameplay(PlayState* play, s32 limbIndex, Gfx** dList, Ve
                     vrStringDone = true;
                 }
                 if (!vrStringDone) {
-                    Matrix_Scale(1.0f, this->unk_858, 1.0f, MTXMODE_APPLY);
+                    Matrix_Scale(1.0f, vrPhysicalGallerySling ? 0.0f : this->unk_858, 1.0f, MTXMODE_APPLY);
 
                     if (!LINK_IS_ADULT) {
                         Matrix_RotateZ(this->unk_858 * -0.2f, MTXMODE_APPLY);

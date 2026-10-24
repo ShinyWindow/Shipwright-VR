@@ -58,6 +58,11 @@ typedef struct {
     f32 ocarinaModulator;
     s8 ocarinaBend;
 
+    // Optional extension carried by PLAYER_UPDATE. Older/non-VR clients omit it and retain the
+    // ordinary networked animation. Matrices are game-world MtxF snapshots for head/left/right.
+    bool vrTracked;
+    MtxF vrPose[3];
+
     // Ptr to the dummy player
     Player* player;
 } AnchorClient;

@@ -6,6 +6,9 @@
 #include <array>
 #include "soh/ActorDB.h"
 #include <fast/interpreter.h>
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
 #define WRITE_VAR_LINE(buff, len, varName, varValue) \
     append_str(buff, len, varName);                  \
@@ -63,7 +66,7 @@ static void CrashHandler_WriteActorData(char* buffer, size_t* pos) {
     }
 }
 
-extern "C" void CrashHandler_PrintSohData(char* buffer, size_t* pos) {
+static void CrashHandler_PrintSohDataImpl(char* buffer, size_t* pos) {
     char intCharBuffer[16];
     append_line(buffer, pos, "Build Information:");
     WRITE_VAR_LINE(buffer, pos, "  Game Version: ", (const char*)gBuildVersion);
@@ -89,4 +92,18 @@ extern "C" void CrashHandler_PrintSohData(char* buffer, size_t* pos) {
             append_line(buffer, pos, line.c_str());
         }
     }
+}
+
+extern "C" void CrashHandler_PrintSohData(char* buffer, size_t* pos) {
+#ifdef _WIN32
+    // A crash may leave gPlayState or its actor lists invalid. Never allow
+    // optional diagnostic collection to replace the original exception.
+    __try {
+        CrashHandler_PrintSohDataImpl(buffer, pos);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        append_line(buffer, pos, "Shipwright runtime data unavailable (invalid state during crash).");
+    }
+#else
+    CrashHandler_PrintSohDataImpl(buffer, pos);
+#endif
 }

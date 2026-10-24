@@ -6,6 +6,7 @@
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/randomizer/item_category_adj.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS 0
 
@@ -419,6 +420,26 @@ void EnBox_WaitOpen(EnBox* this, PlayState* play) {
 
     this->alpha = 255;
     this->movementFlags |= ENBOX_MOVE_IMMOBILE;
+
+    // SOH [VR] The physical two-hand path owns the unopened lid. It deliberately commits the
+    // treasure flag only at the fully-open angle, then leaves the actor in the same finished-open
+    // state as the stock animation. Player_ActionHandler_2 still performs the reward transaction.
+    s32 vrChest = VrChest_Tick(this, play);
+    if (vrChest != 0) {
+        if (vrChest == 2) {
+            linkAge = gSaveContext.linkAge;
+            anim = sAnimations[linkAge];
+            frameCount = Animation_GetLastFrame(anim);
+            Animation_Change(&this->skelanime, anim, 1.5f, frameCount, frameCount, ANIMMODE_ONCE, 0.0f);
+            this->unk_1F4 = this->getItemEntry.gi >= 0 ? 1 : -1;
+            this->unk_1B0 = 0.0f;
+            EnBox_SetupAction(this, EnBox_Open);
+            Flags_SetTreasure(play, this->dyna.actor.params & 0x1F);
+            gSaveContext.ship.stats.count[COUNT_CHESTS_OPENED]++;
+        }
+        return;
+    }
+
     if (this->unk_1F4 != 0) { // unk_1F4 is modified by player code
         linkAge = gSaveContext.linkAge;
         anim = sAnimations[(this->unk_1F4 < 0 ? 2 : 0) + linkAge];
@@ -650,6 +671,9 @@ void EnBox_PostLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s* rot,
         gSPMatrix((*gfx)++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
         gSPDisplayList((*gfx)++, this->boxBodyDL);
     } else if (limbIndex == 3) {
+        MtxF lidMtx;
+        Matrix_Get(&lidMtx);
+        VrChest_RecordLidMatrix(this, &lidMtx.mf[0][0]);
         gSPMatrix((*gfx)++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
         gSPDisplayList((*gfx)++, this->boxLidDL);
     }
@@ -734,4 +758,6 @@ void EnBox_Draw(Actor* thisx, PlayState* play) {
     }
 
     CLOSE_DISPS(play->state.gfxCtx);
+
+    VrChest_DrawItem(this, play);
 }

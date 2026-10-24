@@ -35,6 +35,12 @@ extern "C" bool VrGetItem_HoldUpPos(PlayState* play, Player* player, const float
         return false;
     }
 
+    // A physically opened chest owns the get-item presentation: the normal item model rises from
+    // and remains over that chest instead of jumping from the lid to Link's raised hands.
+    if (VrChest_GetItemHoldUpPos(play, player, out)) {
+        return true;
+    }
+
     // "Out" = horizontally from the eyes through the hands. With the hands (nearly) straight
     // overhead that direction is meaningless, so it eases into Link's facing there.
     float eye[3], fwd[3], up[3];

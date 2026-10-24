@@ -229,7 +229,12 @@ bool CanMount(PlayState* play, Player* player, const VrClimbHit& hit) {
                 nz = COLPOLY_GET_NORMAL(poly->normal.z);
     const float dist = nx * player->actor.world.pos.x + ny * player->actor.world.pos.y +
                        nz * player->actor.world.pos.z + poly->dist;
-    return dist > -5.0f && dist < player->ageProperties->wallCheckRadius + kMountSlackUnits;
+    // Some dynamic climbable actors expose their usable face on the negative side of the authored
+    // polygon plane (the vine face on Dodongo's Cavern's falling stairs is one). Vanilla approaches
+    // these through its wall-contact result, which already knows the player's side. A hand probe has
+    // the polygon directly, so accept the same physical distance from either side; the player code
+    // records the side at mount and keeps its effective normal pointing back toward Link.
+    return fabsf(dist) < player->ageProperties->wallCheckRadius + kMountSlackUnits;
 }
 
 void EndDrive() {

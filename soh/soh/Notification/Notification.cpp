@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #include <fast/Fast3dGui.h>
+#include <vr_interface.h>
 
 namespace Notification {
 
@@ -127,6 +128,7 @@ void Window::UpdateElement() {
             --index;
         }
     }
+    VR_SetNotificationsVisible(!notifications.empty() && CVarGetInteger(CVAR_SETTING("Notifications.Position"), 3) != 4);
 }
 
 void Emit(Options notification) {
@@ -135,6 +137,7 @@ void Emit(Options notification) {
         notification.remainingTime = CVarGetFloat(CVAR_SETTING("Notifications.Duration"), 10.0f);
     }
     notifications.push_back(notification);
+    VR_SetNotificationsVisible(CVarGetInteger(CVAR_SETTING("Notifications.Position"), 3) != 4);
     if (!notification.mute && !CVarGetInteger(CVAR_SETTING("Notifications.Mute"), 0)) {
         Audio_PlaySoundGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
                                &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);

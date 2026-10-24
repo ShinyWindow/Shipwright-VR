@@ -3,7 +3,10 @@ extern "C" {
 #include "macros.h"
 #include "functions.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
+#include "overlays/actors/ovl_En_Arrow/z_en_arrow.h"
 extern PlayState* gPlayState;
+extern SaveContext gSaveContext;
+bool ArrowCycleMain(void);
 }
 #include "VrCombat.h"
 
@@ -30,14 +33,15 @@ extern PlayState* gPlayState;
 // hand-to-pouch gap, shot from the string hand through the pouch); both read their geometry off
 // the model they render, through the live hand draw matrix.
 //
-// Deliberate fallbacks: shooting galleries, bombchu bowling and horseback keep their own
-// schemes (Covers is false there), and gVrPhysArchery=0 restores the previous behavior where
-// the weapon hand's trigger mirrors the item button.
+// Deliberate fallbacks: gallery transitions, bombchu bowling and horseback keep their own
+// schemes. Live shooting-gallery rounds use this physical interaction with their forced B-slot
+// weapon, and gVrPhysArchery=0 restores the previous trigger-to-item-button behavior.
 
 namespace {
 
 bool sNocked = false;
 bool sPinchPrev = true; // require a fresh pinch after entry/reset
+bool sCycleTriggerPrev = true; // same: entering bow mode with it held must not cycle
 float sDrawM = 0.0f;    // current string-hand draw distance, meters
 
 // The firing release is processed by the vanilla pad path a frame AFTER the tick clears the
@@ -47,6 +51,12 @@ float sDrawM = 0.0f;    // current string-hand draw distance, meters
 float sAimLatch[6] = {};
 bool sAimLatchLive = false; // a nock has produced a valid latch this draw cycle
 int sAimLatchTicks = 0;     // >0: keep serving the latch after the nock ended
+Vec3f sAimDotTarget = {};
+bool sAimDotTargetLive = false;
+
+constexpr int kAimDotMaxGfx = 20;
+Gfx sAimDotDl[kAimDotMaxGfx];
+Vtx sAimDotVtx[4];
 
 int StringHand() {
     return CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT;
@@ -135,7 +145,29 @@ bool HoldsBow(Player* player) {
 }
 
 bool HoldsBowNow() {
-    return gPlayState != NULL && HoldsBow(GET_PLAYER(gPlayState));
+    if (gPlayState == NULL) {
+        return false;
+    }
+    // Vanilla starts both shooting galleries through ITEM_BOW. Child Link still renders and
+    // fires the slingshot, so the gallery's internal item action cannot identify its physical
+    // VR geometry: doing so puts the bow's braced nock behind the visible slingshot. Match the
+    // weapon model chosen by the game instead.
+    if (gPlayState->shootingGalleryStatus > 0) {
+        return LINK_IS_ADULT;
+    }
+    return HoldsBow(GET_PLAYER(gPlayState));
+}
+
+bool ShootingGalleryActive() {
+    return gPlayState != NULL && gPlayState->shootingGalleryStatus > 0;
+}
+
+bool ShootingGalleryWeaponReady() {
+    if (!ShootingGalleryActive()) {
+        return false;
+    }
+    const uint8_t item = gSaveContext.equips.buttonItems[0];
+    return item == ITEM_SLINGSHOT || item == ITEM_BOW;
 }
 
 // Rodrigues rotation of v about unit axis k by the angle with cosine c and sine s.
@@ -224,6 +256,60 @@ bool AlignBowMatrix(float m[4][4]) {
     for (int c = 0; c < 3; c++) {
         for (int i = 0; i < 3; i++) {
             m[c][i] = cols[c][i];
+        }
+    }
+    Player* player = gPlayState != NULL ? GET_PLAYER(gPlayState) : NULL;
+    if (player != NULL && (player->stateFlags1 & PLAYER_STATE1_ON_HORSE)) {
+        // Mounted physical bow is POSITION-ONLY after nocking. The previous minimal rotation
+        // still began with the controller's axes, so conflicting wrist orientations could swing
+        // the whole shaft sideways. Rebuild all three axes from bow-hand position, string-hand
+        // position and world up; no controller quaternion survives this block.
+        const float xLen = std::sqrt(m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]);
+        const float yLen = std::sqrt(m[1][0] * m[1][0] + m[1][1] * m[1][1] + m[1][2] * m[1][2]);
+        const float zLen = std::sqrt(m[2][0] * m[2][0] + m[2][1] * m[2][1] + m[2][2] * m[2][2]);
+        float stringPos[3], stringRot[4];
+        if (xLen > 1e-6f && yLen > 1e-6f && zLen > 1e-6f &&
+            VR_GetHandPose(StringHand(), stringPos, stringRot)) {
+            float x[3] = { 0.0f, 1.0f, 0.0f };
+            float y[3] = {};
+            for (int iter = 0; iter < 3; iter++) {
+                float rest[3] = { m[3][0] + x[0] * xLen * kBowNockX,
+                                  m[3][1] + x[1] * xLen * kBowNockX,
+                                  m[3][2] + x[2] * xLen * kBowNockX };
+                float yNorm = 0.0f;
+                for (int i = 0; i < 3; i++) {
+                    y[i] = rest[i] - stringPos[i];
+                    yNorm += y[i] * y[i];
+                }
+                yNorm = std::sqrt(yNorm);
+                if (yNorm < 1e-4f) {
+                    return false;
+                }
+                for (int i = 0; i < 3; i++) {
+                    y[i] /= yNorm;
+                }
+                x[0] = -y[0] * y[1];
+                x[1] = 1.0f - y[1] * y[1];
+                x[2] = -y[2] * y[1];
+                const float xNorm = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+                if (xNorm < 1e-4f) {
+                    return false;
+                }
+                for (int i = 0; i < 3; i++) {
+                    x[i] /= xNorm;
+                }
+            }
+            float z[3] = { x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2],
+                           x[0] * y[1] - x[1] * y[0] };
+            const float oldCross[3] = { m[0][1] * m[1][2] - m[0][2] * m[1][1],
+                                        m[0][2] * m[1][0] - m[0][0] * m[1][2],
+                                        m[0][0] * m[1][1] - m[0][1] * m[1][0] };
+            const float handedness = oldCross[0] * m[2][0] + oldCross[1] * m[2][1] + oldCross[2] * m[2][2];
+            for (int i = 0; i < 3; i++) {
+                m[0][i] = x[i] * xLen;
+                m[1][i] = y[i] * yLen;
+                m[2][i] = z[i] * zLen * (handedness < 0.0f ? -1.0f : 1.0f);
+            }
         }
     }
     return true;
@@ -341,27 +427,33 @@ bool sBowFullFelt = false;  // full-draw pulse already given this nock
 } // namespace
 
 extern "C" bool VrArchery_Covers(Player* player) {
-    if (!VrItemSelect_ModeActive() || !CVarGetInteger("gVrPhysArchery", 1) || player == NULL ||
-        player->actor.category != ACTORCAT_PLAYER || gPlayState == NULL) {
+    const bool gallery = ShootingGalleryActive();
+    const bool horseBow = player != NULL && (player->stateFlags1 & PLAYER_STATE1_ON_HORSE) &&
+                          VrItemSelect_HorseBowEnabled();
+    if (!VR_IsInitialized() || (!VrItemSelect_ModeActive() && !gallery && !horseBow) ||
+        !CVarGetInteger("gVrPhysArchery", 1) || player == NULL || player->actor.category != ACTORCAT_PLAYER ||
+        gPlayState == NULL) {
         return false;
     }
-    if (!VrItemSelect_SelectionAllowed()) {
+    if (!gallery && !horseBow && !VrItemSelect_SelectionAllowed()) {
         return false; // scripted control, transitions, ocarina: no nock, no button mask
     }
-    if (gPlayState->shootingGalleryStatus != 0 || gPlayState->bombchuBowlingStatus != 0 ||
-        (player->stateFlags1 & PLAYER_STATE1_ON_HORSE)) {
-        return false; // galleries, bowling and horseback keep their dedicated schemes
+    if (gPlayState->shootingGalleryStatus < 0 || gPlayState->bombchuBowlingStatus != 0) {
+        return false; // gallery transitions and bowling keep their dedicated schemes
     }
-    return (player->heldItemAction >= PLAYER_IA_BOW && player->heldItemAction <= PLAYER_IA_BOW_0E) ||
+    return ShootingGalleryWeaponReady() ||
+           (player->heldItemAction >= PLAYER_IA_BOW && player->heldItemAction <= PLAYER_IA_BOW_0E) ||
            player->heldItemAction == PLAYER_IA_SLINGSHOT;
 }
 
 extern "C" void VrArchery_Reset(void) {
     sNocked = false;
     sPinchPrev = true;
+    sCycleTriggerPrev = true;
     sDrawM = 0.0f;
     sAimLatchLive = false;
     sAimLatchTicks = 0;
+    sAimDotTargetLive = false;
     sBowShotPower = 0.0f;
     sBowClick = 0;
     sBowFullFelt = false;
@@ -376,14 +468,15 @@ extern "C" void VrArchery_Reset(void) {
 // broken. extern "C" linkage is load-bearing for the block-scope FrameInterpolation
 // declarations inside OPEN_DISPS (see VrItemSelect_Draw).
 extern "C" void VrArchery_DrawNockIcon(void) {
+    const bool gallery = ShootingGalleryWeaponReady();
     if (gPlayState == NULL || !CVarGetInteger("gVrArcheryShowIcon", 0) || !CVarGetInteger("gVrPhysArchery", 1) ||
-        !VrItemSelect_ModeActive() || sNocked) {
+        (!VrItemSelect_ModeActive() && !gallery) || sNocked) {
         return;
     }
     Player* player = GET_PLAYER(gPlayState);
-    if (player == NULL ||
+    if (player == NULL || (!gallery &&
         !((player->heldItemAction >= PLAYER_IA_BOW && player->heldItemAction <= PLAYER_IA_BOW_0E) ||
-          player->heldItemAction == PLAYER_IA_SLINGSHOT)) {
+          player->heldItemAction == PLAYER_IA_SLINGSHOT))) {
         return;
     }
     float anchor[3];
@@ -421,19 +514,133 @@ extern "C" uint16_t VrArchery_ItemButtonMask(void) {
     if (!VrArchery_Covers(player)) {
         return 0;
     }
+    // The gallery owns a temporary B-button ammo counter and starts the forced weapon from B,
+    // regardless of where that item is equipped in the player's ordinary loadout.
+    if (ShootingGalleryActive()) {
+        return BTN_B;
+    }
     static const uint16_t kItemButtons[] = { BTN_B,   BTN_CLEFT, BTN_CDOWN, BTN_CRIGHT,
                                              BTN_DUP, BTN_DDOWN, BTN_DLEFT, BTN_DRIGHT };
     const int slot = player->heldItemButton;
     return (slot >= 0 && slot < (int)(sizeof(kItemButtons) / sizeof(kItemButtons[0]))) ? kItemButtons[slot] : 0;
 }
 
+extern "C" bool VrArchery_GalleryOwnsWeapon(void) {
+    return gPlayState != NULL && ShootingGalleryActive() && VrArchery_Covers(GET_PLAYER(gPlayState));
+}
+
+// Optional world-space aim dot. It follows the exact physical string/pouch line used to place and
+// launch the prepared projectile, and sits on the first world surface along that line. No flat-mode
+// or classic-control path reaches this function because VrArchery_AimSegment requires a live VR nock.
+extern "C" void VrArchery_DrawAimDot(void) {
+    if (gPlayState == NULL || !VR_IsInitialized() || !VR_GetFirstPerson() || VR_IsFlatScreen() ||
+        !CVarGetInteger("gVrArcheryAimDot", 1) || !sNocked) {
+        return;
+    }
+    float ray[6];
+    if (!VrArchery_AimSegment(ray)) {
+        return;
+    }
+    Vec3f start = { ray[0], ray[1], ray[2] };
+    Vec3f end;
+    Vec3f hit = start;
+    CollisionPoly* poly = NULL;
+    s32 bgId = BGCHECK_SCENE;
+    bool foundHit = false;
+    if (HoldsBowNow() && CVarGetInteger("gVrBowDrawPower", 1)) {
+        // Match EnArrow's partial-draw flight instead of promising a straight-line hit. This is
+        // especially important on Epona, where the player's practical draw was often ~50-60%.
+        float norm = BowFullDrawM() > 0.01f ? sDrawM / BowFullDrawM() : 1.0f;
+        norm = norm > 1.0f ? 1.0f : norm;
+        Player* player = GET_PLAYER(gPlayState);
+        const float power = (player != NULL && (player->stateFlags1 & PLAYER_STATE1_ON_HORSE))
+                                ? 1.0f
+                                : 0.3f + 0.7f * norm;
+        const float speed = 150.0f * power;
+        const float gravity = power < 0.99f ? -(1.0f - power) / 0.7f : 0.0f;
+        Vec3f pos = start;
+        Vec3f velocity = { ray[3] * speed, ray[4] * speed, ray[5] * speed };
+        const int life = 12 + (power < 0.99f ? (int)(12.0f * ((1.0f - power) / 0.7f)) : 0);
+        for (int frame = 0; frame < life; frame++) {
+            // EnArrow applies its normal -0.4 gravity once its 12-frame full-power lifetime
+            // falls below 7.2. Partial shots retain their stronger release gravity instead.
+            const bool horseBow = player != NULL && (player->stateFlags1 & PLAYER_STATE1_ON_HORSE);
+            velocity.y += horseBow ? 0.0f : ((power < 0.99f) ? gravity : (frame >= 4 ? -0.4f : 0.0f));
+            end = { pos.x + velocity.x, pos.y + velocity.y, pos.z + velocity.z };
+            if (BgCheck_AnyLineTest3(&gPlayState->colCtx, &pos, &end, &hit, &poly, true, true, true, true, &bgId)) {
+                foundHit = true;
+                break;
+            }
+            pos = end;
+        }
+        if (!foundHit) {
+            hit = end;
+        }
+    } else {
+        end = { start.x + ray[3] * 4000.0f, start.y + ray[4] * 4000.0f,
+                start.z + ray[5] * 4000.0f };
+        if (!BgCheck_AnyLineTest3(&gPlayState->colCtx, &start, &end, &hit, &poly, true, true, true, true, &bgId)) {
+            hit = end;
+        }
+    }
+
+    const float distance = sqrtf(SQ(hit.x - start.x) + SQ(hit.y - start.y) + SQ(hit.z - start.z));
+    sAimDotTarget = hit;
+    sAimDotTargetLive = true;
+    float ws = WorldScale();
+    const float half = fmaxf(0.006f * ws, 0.00375f * distance);
+    const float scale = half / 16.0f;
+    const s16 p = 16;
+    const Vtx dot[4] = {
+        { { { 0, p, 0 }, 0, { 0, 0 }, { 255, 235, 70, 245 } } },
+        { { { p, 0, 0 }, 0, { 0, 0 }, { 255, 235, 70, 245 } } },
+        { { { -p, 0, 0 }, 0, { 0, 0 }, { 255, 235, 70, 245 } } },
+        { { { 0, -p, 0 }, 0, { 0, 0 }, { 255, 235, 70, 245 } } },
+    };
+    for (int i = 0; i < 4; i++) {
+        sAimDotVtx[i] = dot[i];
+    }
+
+    FrameInterpolation_RecordOpenChild((const void*)sAimDotDl, 0);
+    Matrix_Translate(hit.x, hit.y, hit.z, MTXMODE_NEW);
+    Matrix_ReplaceRotation(&gPlayState->billboardMtxF);
+    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+    Mtx* dotMtx = MATRIX_NEWMTX(gPlayState->state.gfxCtx);
+    FrameInterpolation_RecordCloseChild();
+
+    Gfx* pDl = sAimDotDl;
+    gDPPipeSync(pDl++);
+    gDPSetCycleType(pDl++, G_CYC_1CYCLE);
+    gDPSetRenderMode(pDl++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+    gDPSetCombineMode(pDl++, G_CC_SHADE, G_CC_SHADE);
+    gSPTexture(pDl++, 0, 0, 0, G_TX_RENDERTILE, G_OFF);
+    gSPClearGeometryMode(pDl++, G_CULL_BOTH | G_LIGHTING | G_FOG | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR | G_ZBUFFER);
+    gSPSetGeometryMode(pDl++, G_SHADE | G_SHADING_SMOOTH);
+    gSPMatrix(pDl++, dotMtx, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPVertex(pDl++, (uintptr_t)sAimDotVtx, 4, 0);
+    gSP2Triangles(pDl++, 0, 2, 1, 0, 1, 2, 3, 0);
+    gSPEndDisplayList(pDl++);
+
+    OPEN_DISPS(gPlayState->state.gfxCtx);
+    gSPDisplayList(POLY_XLU_DISP++, sAimDotDl);
+    CLOSE_DISPS(gPlayState->state.gfxCtx);
+}
+
 // The string hand's pinch input loses its normal binding only when it is about to nock (near
 // the weapon) or currently drawn — a pinch elsewhere keeps whatever it is bound to.
 extern "C" bool VrArchery_PinchConsumed(int32_t vrHand, uint16_t vrBtnMask) {
-    if (gPlayState == NULL || vrHand != StringHand() || !(vrBtnMask & PinchMask()) || VrOcarina_InPlay()) {
+    if (gPlayState == NULL || VrOcarina_InPlay()) {
         return false;
     }
-    if (!VrArchery_Covers(GET_PLAYER(gPlayState))) {
+    Player* player = GET_PLAYER(gPlayState);
+    if (CVarGetInteger("gVrBowTriggerArrowCycle", 0) && vrHand == BowHand() &&
+        (vrBtnMask & VR_BTN_TRIGGER) && HoldsBowNow() && VrArchery_Covers(player)) {
+        return true;
+    }
+    if (vrHand != StringHand() || !(vrBtnMask & PinchMask())) {
+        return false;
+    }
+    if (!VrArchery_Covers(player)) {
         return false;
     }
     return sNocked || NearBow();
@@ -571,20 +778,44 @@ extern "C" int32_t VrArchery_NockedArrowHand(void) {
     if (!sNocked || gPlayState == NULL || !HoldsBowNow() || !VrArchery_Covers(GET_PLAYER(gPlayState))) {
         return -1;
     }
+    // Horseback uses the same arrow-to-aligned-bow weld as on foot. AlignBowMatrix has already
+    // rebuilt the mounted bow frame from hand positions and world-up, so no controller rotation
+    // can leak through this weld.
     return BowHand();
+}
+
+extern "C" int32_t VrArchery_NockedArrowHandForActor(Actor* arrow) {
+    if (arrow == NULL || gPlayState == NULL) {
+        return -1;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    return player->heldActor == arrow && arrow->parent == &player->actor ? VrArchery_NockedArrowHand() : -1;
 }
 
 // Draw strength -> arrow power, the VR-bow convention: a full draw is the vanilla shot exactly;
 // a partial draw leaves slower and drops. Consumed once by EnArrow_Shoot at the vanilla release
 // that follows a firing bow release; 0 = not a physical bow shot, leave the shot vanilla.
 extern "C" float VrArchery_TakeBowShotPower(void) {
-    if (sBowShotPower <= 0.0f || sAimLatchTicks <= 0) {
+    if (sBowShotPower <= 0.0f) {
         sBowShotPower = 0.0f;
         return 0.0f;
     }
     const float p = sBowShotPower;
     sBowShotPower = 0.0f;
     return p;
+}
+
+extern "C" bool VrArchery_TakeReleasedAim(float* outPosDir6) {
+    if (outPosDir6 == NULL || !sAimLatchLive || sBowShotPower <= 0.0f) {
+        return false;
+    }
+    for (int i = 0; i < 6; i++) {
+        outPosDir6[i] = sAimLatch[i];
+    }
+    // The launch path has its copy. It must not leak into a later vanilla projectile.
+    sAimLatchLive = false;
+    sAimLatchTicks = 0;
+    return true;
 }
 
 namespace {
@@ -607,7 +838,7 @@ void ArcheryTick() {
 
     if (sAimLatchTicks > 0 && !sNocked) {
         sAimLatchTicks--;
-        if (sAimLatchTicks == 0) {
+        if (sAimLatchTicks == 0 && sBowShotPower <= 0.0f) {
             sAimLatchLive = false;
         }
     }
@@ -617,6 +848,13 @@ void ArcheryTick() {
     sPinchPrev = pinch;
 
     const bool bow = HoldsBow(player);
+    const bool cycleHeld = bow && CVarGetInteger("gVrBowTriggerArrowCycle", 0) &&
+                           (VR_GetControllerButton(BowHand()) & VR_BTN_TRIGGER) != 0;
+    const bool cyclePressed = cycleHeld && !sCycleTriggerPrev;
+    sCycleTriggerPrev = cycleHeld;
+    if (cyclePressed && sNocked && ArrowCycleMain()) {
+        VR_TriggerHaptic(BowHand(), 0.45f, 0.0f, 25.0f);
+    }
     const float gap = CurrentDrawM();
     if (gap >= 0.0f) {
         sDrawM = gap;
@@ -682,12 +920,47 @@ void ArcheryTick() {
         // The nock mask drops with sNocked this tick; the vanilla button release fires the
         // prepared shot NEXT tick — the aim latch keeps serving the drawn pull line through
         // that window so the fallback ray cannot overwrite the direction. Thunk both hands.
-        sAimLatchTicks = 4;
+        // On foot the arrow detaches on the next update, but the horseback release animation
+        // can keep it parented for considerably longer. Preserve the exact dot/string line
+        // until that delayed horse arrow reaches EnArrow_Shoot; otherwise it falls back to the
+        // mounted animation pose and wrist orientation before velocity is calculated.
+        sAimLatchTicks = (player->stateFlags1 & PLAYER_STATE1_ON_HORSE) ? 30 : 4;
         if (bow) {
             // Power from draw: 30% at no draw up to the full vanilla shot at full draw.
             float norm = sDrawM / BowFullDrawM();
             norm = norm > 1.0f ? 1.0f : norm;
-            sBowShotPower = CVarGetInteger("gVrBowDrawPower", 1) ? 0.3f + 0.7f * norm : 1.0f;
+            sBowShotPower = (player->stateFlags1 & PLAYER_STATE1_ON_HORSE)
+                                ? 1.0f
+                                : (CVarGetInteger("gVrBowDrawPower", 1) ? 0.3f + 0.7f * norm : 1.0f);
+            // The dot is what the player actually aimed at in the headset. On Epona, a trigger
+            // release can land between headset-rate poses and the 20 Hz game update; rebuilding
+            // from that update's hand sample occasionally produced a large sideways shot. Make
+            // the last displayed world-space dot authoritative for mounted straight-flight aim.
+            if ((player->stateFlags1 & PLAYER_STATE1_ON_HORSE) && sAimLatchLive && sAimDotTargetLive) {
+                const float dx = sAimDotTarget.x - sAimLatch[0];
+                const float dy = sAimDotTarget.y - sAimLatch[1];
+                const float dz = sAimDotTarget.z - sAimLatch[2];
+                const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (len > 1e-4f) {
+                    sAimLatch[3] = dx / len;
+                    sAimLatch[4] = dy / len;
+                    sAimLatch[5] = dz / len;
+                }
+            }
+            // Commit the physical release to the prepared arrow itself. Mounted Link keeps the
+            // arrow parented through a longer animation, during which ordinary archery state can
+            // reset and the limb callback can rewrite its pose. Neither may alter this shot.
+            if (sAimLatchLive && player->heldActor != NULL && player->heldActor->id == ACTOR_EN_ARROW) {
+                EnArrow* arrow = (EnArrow*)player->heldActor;
+                arrow->vrPhysicalBowShot = true;
+                arrow->vrHorseBowShot = (player->stateFlags1 & PLAYER_STATE1_ON_HORSE) != 0;
+                arrow->vrBowPower = sBowShotPower;
+                arrow->vrBowAimOrigin = { sAimLatch[0], sAimLatch[1], sAimLatch[2] };
+                arrow->vrBowAimDir = { sAimLatch[3], sAimLatch[4], sAimLatch[5] };
+                // The actor owns both values now; do not leave a global release that a later
+                // unrelated arrow could consume after the mounted animation resets archery.
+                sBowShotPower = 0.0f;
+            }
             // The string slaps the bow: the bow hand takes the bigger kick.
             VR_TriggerHaptic(BowHand(), 0.6f + 0.4f * norm, 0.0f, 50.0f);
             VR_TriggerHaptic(StringHand(), 0.5f, 0.0f, 30.0f);
@@ -707,6 +980,7 @@ void ArcheryTick() {
 void RegisterVrArchery() {
     COND_HOOK(OnPlayerUpdate, true, ArcheryTick);
     COND_HOOK(OnPlayDrawEnd, true, VrArchery_DrawNockIcon);
+    COND_HOOK(OnPlayDrawEnd, true, VrArchery_DrawAimDot);
 }
 
 static RegisterShipInitFunc initVrArchery(RegisterVrArchery);

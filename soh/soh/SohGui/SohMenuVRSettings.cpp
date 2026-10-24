@@ -46,6 +46,8 @@ static const std::map<int32_t, const char*> vrHudLayoutOptions = {
 // Open state of the collapsed "Calibration (Dev)" groups (closed every launch).
 static bool sVrComfortCalOpen = false;
 static bool sVrCombatCalOpen = false;
+static bool sVrSmallKeyCalOpen = false;
+static bool sVrBossKeyCalOpen = false;
 
 static bool VrHudWristLayout() {
     return CVarGetInteger("gVrHudLayout", 0) == 0;
@@ -435,11 +437,33 @@ static void VrPerformanceReadout(WidgetInfo& info) {
     VrFrameStats s = {};
     vr_get_frame_stats(&s);
 
+#ifdef __ANDROID__
+    constexpr int singlePassDefault = 1;
+#else
+    constexpr int singlePassDefault = 0;
+#endif
+    const bool singlePassRequested = CVarGetInteger("gVrMultiview", singlePassDefault) != 0;
+    const bool singlePassActive = vr_multiview_enabled();
+    if (singlePassActive) {
+        ImGui::TextUnformatted("Stereo renderer       Single-pass");
+    } else if (singlePassRequested) {
+        ImGui::TextUnformatted("Stereo renderer       Two-pass (restart or unsupported)");
+    } else {
+        ImGui::TextUnformatted("Stereo renderer       Two-pass");
+    }
+    const bool hiddenAreaRequested = CVarGetInteger("gVrHiddenAreaMask", 0) != 0;
+    if (vr_visibility_mask_enabled()) {
+        ImGui::TextUnformatted("Hidden-area mask      Active");
+    } else if (hiddenAreaRequested) {
+        ImGui::TextUnformatted("Hidden-area mask      Restart or unsupported");
+    } else {
+        ImGui::TextUnformatted("Hidden-area mask      Off");
+    }
     ImGui::Text("XR frames submitted   %6.1f Hz", s.frame_hz);
     ImGui::Text("Stereo pairs rendered %6.1f Hz", s.eye_hz);
     ImGui::Separator();
     ImGui::Text("XR wait (headroom)  %6.2f ms", s.wait_ms);
-    ImGui::Text("Both eye passes     %6.2f ms", s.eyes_ms);
+    ImGui::Text("Stereo eye rendering %6.2f ms", s.eyes_ms);
     ImGui::Text("HUD quad pass       %6.2f ms", s.hud_ms);
     ImGui::Text("Companion window    %6.2f ms", s.desktop_ms);
     ImGui::Text("Whole frame         %6.2f ms", s.frame_ms);
@@ -655,6 +679,10 @@ static void VrHudProfileEditor(int child) {
                         VrHudSaveSoon();
                     }
                     for (const auto& f : kVrHudElementFields) {
+                        if ((d.id == VR_HUD_EL_PHYSICAL_KEYS || d.id == VR_HUD_EL_PHYSICAL_BOSS_KEY) &&
+                            strcmp(f.field, "X") == 0) {
+                            continue;
+                        }
                         VrHudElementCVar(name, sizeof(name), child, d.key, f.field);
                         VrHudSliderRow(f.label, name, VrHudElementDefault(d, child, f.field), f.min, f.max, f.fmt, nullptr);
                     }
@@ -1635,7 +1663,207 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("When you get an item and Link holds it up, it sits this much further "
                               "out from your hands (away from you), so it isn't right on top of "
                               "your head. It still follows your hands."));
+    AddWidget(gameplayPath, "Bombchus", WIDGET_SEPARATOR_TEXT);
+    AddWidget(gameplayPath, "Bombchu Floor Aim Arrow", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBombchuAimGuide")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Shows an always-visible yellow arrow on the floor while holding a physical "
+                              "bombchu. The arrow follows your horizontal view direction and shows where "
+                              "the bombchu will crawl after release."));
+    AddWidget(gameplayPath, "Physical Bombchu Fuse: %.1f s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBombchuFuseSeconds")
+        .Options(FloatSliderOptions()
+                     .Min(6.0f)
+                     .Max(20.0f)
+                     .DefaultValue(8.0f)
+                     .Step(0.5f)
+                     .Format("%.1f")
+                     .Tooltip("Fuse duration for bombchus grabbed through the physical VR interaction. "
+                              "Defaults to eight seconds; six seconds is the original duration. This does not affect button-used "
+                              "bombchus or non-VR gameplay."));
+    AddWidget(gameplayPath, "Fairy Bow", WIDGET_SEPARATOR_TEXT);
+    AddWidget(gameplayPath, "Bow-Hand Trigger Cycles Arrows", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrBowTriggerArrowCycle")
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "While a physical bow arrow is nocked, press the bow-hand trigger to cycle through "
+            "normal, fire, ice and light arrows. Types you do not own or cannot afford are skipped. "
+            "Works on foot and on Epona, and does not change non-VR controls."));
     AddWidget(gameplayPath, "Climbing", WIDGET_SEPARATOR_TEXT);
+    AddWidget(gameplayPath, "Physical Doors", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysicalDoors")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Ordinary unlocked hinged doors can be opened by grabbing the handle, turning it, then "
+            "pushing or pulling the leaf around its hinge. Locked and special doors retain their "
+            "original controls. VR only."));
+    AddWidget(gameplayPath, "Physical Chests", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysicalChests")
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "First-person VR only: place both hands anywhere on an unopened chest lid, hold both grips, "
+            "and lift to open it. The item rises from the opened chest before its normal message and fanfare."));
+    AddWidget(gameplayPath, "Show Door Grab Markers", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrDoorShowGrabMarkers")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalDoors", 1); })
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Shows miniature Deku Nuts at the two physical door-knob grab zones. Hiding them does not disable grabbing."));
+    AddWidget(gameplayPath, "Door Handle Right Offset: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrDoorHandleRight")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalDoors", 1); })
+        .Options(FloatSliderOptions().Min(0.0f).Max(40.0f).DefaultValue(23.0f).Step(0.5f).Format("%.1f")
+                     .Tooltip("Development calibration: distance from the centre toward the visible right-hand side."));
+    AddWidget(gameplayPath, "Door Handle Height: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrDoorHandleY")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalDoors", 1); })
+        .Options(FloatSliderOptions().Min(10.0f).Max(80.0f).DefaultValue(38.0f).Step(0.5f).Format("%.1f")
+                     .Tooltip("Development calibration: moves the Deku Nut grab point vertically."));
+    AddWidget(gameplayPath, "Door Handle Surface Offset: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrDoorHandleDepth")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalDoors", 1); })
+        .Options(FloatSliderOptions().Min(0.0f).Max(15.0f).DefaultValue(3.0f).Step(0.5f).Format("%.1f")
+                     .Tooltip("Development calibration: moves the marker outward from each face of the door."));
+    AddWidget(gameplayPath, "Door Hinge Offset: %.1f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrDoorHingeOffset")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalDoors", 1); })
+        .Options(FloatSliderOptions().Min(20.0f).Max(40.0f).DefaultValue(27.0f).Step(0.25f).Format("%.2f")
+                     .Tooltip("Aligns handle markers and collision with the rendered door's skeletal hinge while it rotates."));
+    AddWidget(gameplayPath, "Door Grab Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrDoorGrabRadius")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalDoors", 1); })
+        .Options(FloatSliderOptions().Min(5.0f).Max(35.0f).DefaultValue(18.0f).Step(1.0f).Format("%.0f cm")
+                     .Tooltip("Development calibration: hand distance from the Deku Nut that accepts a fresh grab."));
+    AddWidget(gameplayPath, "Door Swing Amount: %.2fx", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrDoorSwingGain")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalDoors", 1); })
+        .Options(FloatSliderOptions().Min(0.75f).Max(3.0f).DefaultValue(1.75f).Step(0.05f).Format("%.2fx")
+                     .Tooltip("Development calibration: how far the door swings for the physical hand arc."));
+    AddWidget(gameplayPath, "Share VR Tracking with Anchor", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrAnchorShareTracking")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Sends headset and controller poses in Anchor player updates. Hide Link Body is never shared; "
+            "other players continue to see your complete Link avatar."));
+    AddWidget(gameplayPath, "Show Anchor Players' VR Tracking", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrAnchorShowTracking")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Uses VR tracking included by compatible Anchor peers to pose their visible head and hands. "
+            "Peers without this extension retain normal networked animations."));
+    AddWidget(gameplayPath, "Physical Dungeon Keys", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysicalKeys")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Adds Small Key and Boss Key icons beneath the left-hand HUD. Reach to an icon and squeeze "
+            "grip to create its physical key; releasing returns it unless a compatible lock consumes it."));
+    AddWidget(gameplayPath, "Key Grab Radius: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrKeyGrabRadius")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(5.0f).Max(30.0f).DefaultValue(12.0f).Step(1.0f).Format("%.0f cm")
+                     .Tooltip("How close the grabbing controller must be to a visible wrist key icon."));
+    AddWidget(gameplayPath, "Key Cards Horizontal Offset: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrPhysicalKeysOffsetX")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-100.0f).Max(100.0f).DefaultValue(0.0f).Step(1.0f).Format("%.0f")
+                     .Tooltip("Moves both key cards together. At zero, the gap between them is aligned with "
+                              "the centre of the main left-wrist HUD card."));
+    const size_t smallKeyCalBegin =
+        vrBeginCollapsed(gameplayPath, "Small Key Calibration##SmallKeyCal", &sVrSmallKeyCalOpen);
+    AddWidget(gameplayPath, "Held Size: %.0f%%##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyHeldScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(100.0f).Max(5000.0f).DefaultValue(180.0f).Step(25.0f).Format("%.0f%%")
+                     .Tooltip("Size of the physical Small Key after taking it from the wrist icon."));
+    AddWidget(gameplayPath, "Held Roll: %.0f deg##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyRollDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(-90.0f).Step(5.0f).Format("%.0f deg")
+                     .Tooltip("Rolls the held Small Key around its shaft."));
+    AddWidget(gameplayPath, "Held Horizontal Position: %.1f cm##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyHeldOffsetX")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f cm"));
+    AddWidget(gameplayPath, "Held Vertical Position: %.1f cm##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyHeldOffsetY")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f cm"));
+    AddWidget(gameplayPath, "Held Forward Position: %.1f cm##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyHeldOffsetZ")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f cm"));
+    AddWidget(gameplayPath, "Lock Rotation Y: %.0f deg##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyInsertRollDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(90.0f).Step(5.0f).Format("%.0f deg")
+                     .Tooltip("Rotates an inserted Small Key around its Y axis."));
+    AddWidget(gameplayPath, "Lock Rotation X: %.0f deg##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyInsertRotXDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(0.0f).Step(5.0f).Format("%.0f deg"));
+    AddWidget(gameplayPath, "Lock Rotation Z: %.0f deg##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyInsertRotZDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(0.0f).Step(5.0f).Format("%.0f deg"));
+    AddWidget(gameplayPath, "Lock Horizontal Position: %.1f##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyLockOffsetX")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-50.0f).Max(50.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+    AddWidget(gameplayPath, "Lock Vertical Position: %.1f##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyLockOffsetY")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-50.0f).Max(50.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+    AddWidget(gameplayPath, "Lock Insertion Depth: %.1f##SmallKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrSmallKeyLockOffsetDepth")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-50.0f).Max(50.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+    vrEndCollapsed(gameplayPath, smallKeyCalBegin, &sVrSmallKeyCalOpen);
+
+    const size_t bossKeyCalBegin =
+        vrBeginCollapsed(gameplayPath, "Boss Key Calibration##BossKeyCal", &sVrBossKeyCalOpen);
+    AddWidget(gameplayPath, "Held Size: %.0f%%##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyHeldScale")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(100.0f).Max(5000.0f).DefaultValue(180.0f).Step(25.0f).Format("%.0f%%")
+                     .Tooltip("Size of the physical Boss Key after taking it from the wrist icon."));
+    AddWidget(gameplayPath, "Held Roll: %.0f deg##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyRollDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(-90.0f).Step(5.0f).Format("%.0f deg")
+                     .Tooltip("Rolls the held Boss Key around its shaft."));
+    AddWidget(gameplayPath, "Held Horizontal Position: %.1f cm##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyHeldOffsetX")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f cm"));
+    AddWidget(gameplayPath, "Held Vertical Position: %.1f cm##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyHeldOffsetY")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f cm"));
+    AddWidget(gameplayPath, "Held Forward Position: %.1f cm##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyHeldOffsetZ")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-30.0f).Max(30.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f cm"));
+    AddWidget(gameplayPath, "Lock Rotation Y: %.0f deg##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyInsertRollDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(90.0f).Step(5.0f).Format("%.0f deg")
+                     .Tooltip("Rotates only an inserted Boss Key around its shaft. Set it so the key's flat plane "
+                              "forms a 90-degree angle with the flat lock face."));
+    AddWidget(gameplayPath, "Lock Rotation X: %.0f deg##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyInsertRotXDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(0.0f).Step(5.0f).Format("%.0f deg"));
+    AddWidget(gameplayPath, "Lock Rotation Z: %.0f deg##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyInsertRotZDeg")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-180.0f).Max(180.0f).DefaultValue(0.0f).Step(5.0f).Format("%.0f deg"));
+    AddWidget(gameplayPath, "Lock Horizontal Position: %.1f##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyLockOffsetX")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-50.0f).Max(50.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+    AddWidget(gameplayPath, "Lock Vertical Position: %.1f##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyLockOffsetY")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-50.0f).Max(50.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+    AddWidget(gameplayPath, "Lock Insertion Depth: %.1f##BossKey", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrBossKeyLockOffsetDepth")
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrPhysicalKeys", 1); })
+        .Options(FloatSliderOptions().Min(-50.0f).Max(50.0f).DefaultValue(0.0f).Step(0.5f).Format("%.1f"));
+    vrEndCollapsed(gameplayPath, bossKeyCalBegin, &sVrBossKeyCalOpen);
     AddWidget(gameplayPath, "Physical Climbing", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrPhysClimb")
         .Options(CheckboxOptions()
@@ -1674,6 +1902,38 @@ void SohMenu::AddMenuVRSettings() {
             "Draw hand velocity arrows and the per-tick motion path in the world, plus the live "
             "speed readout below. Arrow color previews the swing tiers: green = too slow to "
             "count, yellow = normal hit, red = strong hit."));
+
+    AddWidget(physPath, "Megaton Hammer", WIDGET_SEPARATOR_TEXT);
+    AddWidget(physPath, "Physical Hammer", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrPhysHammer")
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("The hammer swings with your arms and has real weight: the head trails your "
+                              "hands and carries through, and it stops dead on walls, floors and bodies. "
+                              "One-handed it is slow and droops; squeeze grip with your other hand on the "
+                              "handle to hold it with both for control and power. Disable for the base game's "
+                              "button swings."));
+    AddWidget(physPath, "Hammer Ground-Pound Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerPoundReach")
+        .Options(FloatSliderOptions()
+                     .Min(0.0f)
+                     .Max(60.0f)
+                     .DefaultValue(15.0f)
+                     .Step(1.0f)
+                     .Format("%.0f")
+                     .Tooltip("Extra floor-only reach for a downward ground-pound swing. This helps players whose "
+                              "standing arm reach cannot put the hammer on the floor. Zero requires exact physical "
+                              "contact; enemy, wall, and object collision are never extended."));
+    AddWidget(physPath, "Hammer Ground-Pound Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar("gVrHammerPoundSpeed")
+        .Options(FloatSliderOptions()
+                     .Min(0.5f)
+                     .Max(8.0f)
+                     .DefaultValue(2.5f)
+                     .Step(0.1f)
+                     .Format("%.1f")
+                     .Tooltip("How fast the head must move downward for a ground pound. This speed is required "
+                              "for both exact floor contact and the optional reach assist."));
 
     const size_t combatCalBegin =
         vrBeginCollapsed(physPath, "Calibration (Dev)##CombatCal", &sVrCombatCalOpen);
@@ -2669,8 +2929,8 @@ void SohMenu::AddMenuVRSettings() {
 
     AddWidget(perfPath, "Render Cost", WIDGET_SEPARATOR_TEXT);
     AddWidget(perfPath, "The game's display list is walked once per eye, every frame (once for both "
-                       "with Single-Pass Stereo on Quest). At 120 Hz that is 240 full traversals a "
-                       "second on one thread, plus the HUD. These "
+                       "when Single-Pass Stereo is supported and enabled). At 120 Hz that is 240 "
+                       "full traversals a second on one thread, plus the HUD. These "
                        "settings trade world-update rate for headroom; head tracking always stays "
                        "at the headset's full rate because skipped frames are reprojected by the "
                        "compositor.",
@@ -2732,15 +2992,36 @@ void SohMenu::AddMenuVRSettings() {
                      .Tooltip("Multiplier on the runtime's recommended per-eye resolution. This is "
                               "the GPU-side knob. Applied when the OpenXR session is created, so "
                               "it takes effect on the next restart."));
-#ifdef __ANDROID__
     AddWidget(perfPath, "Single-Pass Stereo", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrMultiview")
         .Options(CheckboxOptions()
+#ifdef __ANDROID__
                      .DefaultValue(true)
+#else
+                     .DefaultValue(false)
+#endif
                      .Tooltip("Walk the game's display list once per frame and let the GPU draw both "
-                              "eyes from it (OpenGL ES multiview), instead of once per eye. Roughly "
-                              "halves the render thread's work. Takes effect the next time the game "
-                              "starts. Turn off if the image looks wrong in one eye."));
+                              "eyes from it, instead of once per eye. This can substantially reduce "
+                              "CPU render-thread work without lowering image quality. Supported on "
+                              "OpenGL ES multiview and compatible PC DirectX 11 hardware; unsupported "
+                              "systems automatically keep the normal two-pass renderer. Takes effect "
+                              "the next time VR starts. Turn off if the image looks wrong in one eye."));
+#ifndef __ANDROID__
+    AddWidget(perfPath, "D3D11 State Cache", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrD3D11StateCache")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Reuse immutable DirectX 11 depth-stencil and rasterizer states instead of recreating them when "
+            "render modes repeat. This reduces render-thread and driver work without changing image quality. "
+            "Turn off only for performance comparisons or troubleshooting; takes effect immediately."));
+    AddWidget(perfPath, "Hidden-Area Mask", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrHiddenAreaMask")
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Use the OpenXR runtime's lens-hidden mesh to skip pixels that cannot be seen through the headset "
+            "lenses. This preserves the visible image and can reduce GPU work. Currently supported by the "
+            "DirectX 11 VR renderer; unsupported runtimes automatically render the complete eye image. Takes "
+            "effect the next time the game starts. Frames copied to the desktop companion render a complete "
+            "left eye; a higher Companion Window Divisor leaves more headset-only frames available for this "
+            "optimization."));
 #endif
     AddWidget(perfPath, "Distance-Based Actor Culling", WIDGET_CVAR_CHECKBOX)
         .CVar("gVrActorCullDistance")
@@ -2757,6 +3038,12 @@ void SohMenu::AddMenuVRSettings() {
                               "distance from your head, the same in every direction. Fewer actors "
                               "run at once (cheaper), but enemies and objects far off to your sides "
                               "pause sooner than in vanilla. Default on for Quest, off on PC."));
+
+    AddWidget(perfPath, "Display-List Processing Cache", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrInterpreterCache")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Caches immutable geometry resource lookups and repeated shader metadata throughout VR. "
+            "Improves CPU performance without reducing visual quality. Disable only for compatibility testing."));
 
     perfPath.column = SECTION_COLUMN_2;
     AddWidget(perfPath, "Live Frame Cost", WIDGET_SEPARATOR_TEXT);
@@ -2895,17 +3182,7 @@ void SohMenu::AddMenuVRSettings() {
                               "Grip closed at that moment = caught into the hand; grip open = it "
                               "vanishes and the pocket shows it again."));
     AddWidget(devPath, "VrBoomerangReadout", WIDGET_CUSTOM).CustomFunction(VrBoomerangReadout).HideInSearch(true);
-    AddWidget(devPath, "Megaton Hammer", WIDGET_SEPARATOR_TEXT);
-    AddWidget(devPath, "Physical Hammer", WIDGET_CVAR_CHECKBOX)
-        .CVar("gVrPhysHammer")
-        .Options(CheckboxOptions()
-                     .DefaultValue(true)
-                     .Tooltip("The hammer swings with your arms and has real weight: the head trails your "
-                              "hands and carries through, and it stops dead on walls, floors and bodies. "
-                              "One-handed it is slow and droops; squeeze grip with your other hand on the "
-                              "handle to hold it with both for control and power. Slam the head into the "
-                              "floor hard enough for the ground pound. Disable for the base game's button "
-                              "swings."));
+    AddWidget(devPath, "Megaton Hammer (Advanced)", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Hammer One-Hand Torque: %.0f", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrHammer1HAccel")
         .Options(FloatSliderOptions()
@@ -3015,17 +3292,6 @@ void SohMenu::AddMenuVRSettings() {
                      .Step(0.1f)
                      .Format("%.1f")
                      .Tooltip("Head speed for the heavy blow (the base game's jump-attack hammer damage)."));
-    AddWidget(devPath, "Hammer Ground Pound Speed: %.1f m/s", WIDGET_CVAR_SLIDER_FLOAT)
-        .CVar("gVrHammerPoundSpeed")
-        .Options(FloatSliderOptions()
-                     .Min(0.5f)
-                     .Max(8.0f)
-                     .DefaultValue(2.5f)
-                     .Step(0.1f)
-                     .Format("%.1f")
-                     .Tooltip("How fast the head must be moving INTO a floor for the ground pound "
-                              "(shockwave, quake, and the thump that flips Tektites and stuns scrubs). "
-                              "The same speed into a wall gives the base game's wall strike."));
     AddWidget(devPath, "VrHammerReadout", WIDGET_CUSTOM).CustomFunction(VrHammerReadout).HideInSearch(true);
     AddWidget(devPath, "Carrying", WIDGET_SEPARATOR_TEXT);
     AddWidget(devPath, "Physical Carrying", WIDGET_CVAR_CHECKBOX)
@@ -3312,8 +3578,7 @@ void SohMenu::AddMenuVRSettings() {
                               "hand to the weapon and squeeze its trigger to nock, pull back to "
                               "draw, release to fire along the line between your hands. Releasing "
                               "with almost no draw cancels the shot and keeps the ammo. Disable "
-                              "for the classic scheme (weapon-hand trigger draws and fires). "
-                              "Shooting galleries and horseback keep their own controls."));
+                              "for the classic scheme (weapon-hand trigger draws and fires)."));
     AddWidget(devPath, "Slingshot Nock Reach: %.0f cm", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryNockRadius")
         .Options(FloatSliderOptions()
@@ -3338,6 +3603,12 @@ void SohMenu::AddMenuVRSettings() {
         .Options(CheckboxOptions().DefaultValue(false).Tooltip(
             "Shows a small Deku Nut where the string is nocked on the bow and slingshot, so you "
             "can see where to pinch. Off by default: the string itself is the target."));
+    AddWidget(devPath, "Archery Aim Dot", WIDGET_CVAR_CHECKBOX)
+        .CVar("gVrArcheryAimDot")
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Shows a small yellow dot where the physically aimed bow or slingshot shot line meets "
+            "the world. It appears only while the string or pouch is nocked, and can be disabled "
+            "without changing projectile aim."));
     AddWidget(devPath, "Nock Icon Size: %.0f%%", WIDGET_CVAR_SLIDER_FLOAT)
         .CVar("gVrArcheryIconScale")
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger("gVrArcheryShowIcon", 0); })

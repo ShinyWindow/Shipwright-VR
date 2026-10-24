@@ -4,6 +4,7 @@
 #include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 #include <assert.h>
 
 #define SS_NULL 0xFFFF
@@ -1902,6 +1903,12 @@ s32 BgCheck_CheckWallImpl(CollisionContext* colCtx, u16 xpFlags, Vec3f* posResul
     *outPoly = NULL;
     lookupTbl = colCtx->lookupTbl;
     *posResult = *posNext;
+    // SOH [VR] Physical doors: the original scripted animation bypasses the doorway boundary for
+    // Link. When the player has physically opened and released that door, omit wall response only
+    // inside its central aperture so both stick walking and roomscale can cross naturally.
+    if (VrDoor_AllowsWallPass(actor, &posNext->x, &posPrev->x)) {
+        return false;
+    }
     dx = posNext->x - posPrev->x;
     dy = posNext->y - posPrev->y;
     dz = posNext->z - posPrev->z;

@@ -7,6 +7,7 @@
 #include "z_door_gerudo.h"
 #include "objects/object_door_gerudo/object_door_gerudo.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS 0
 
@@ -99,6 +100,12 @@ s32 func_80994750(DoorGerudo* this, PlayState* play) {
 }
 
 void func_8099485C(DoorGerudo* this, PlayState* play) {
+    // SOH [VR] The Gerudo grate uses a distinct actor, so explicitly offer its padlock to the
+    // physical small-key system once the carpenter's guard requirement has been satisfied.
+    if (this->unk_164 == 0 && Flags_GetCollectible(play, (this->dyna.actor.params >> 8) & 0x1F) &&
+        VrKeys_TryGerudoDoor(this, play)) {
+        this->unk_164 = 1;
+    }
     if (this->unk_164 != 0) {
         this->actionFunc = func_8099496C;
         gSaveContext.inventory.dungeonKeys[gSaveContext.mapIndex] -= 1;
@@ -126,10 +133,22 @@ void func_8099485C(DoorGerudo* this, PlayState* play) {
 }
 
 void func_8099496C(DoorGerudo* this, PlayState* play) {
-    if (DECR(this->unk_166) == 0) {
-        Audio_PlayActorSound2(&this->dyna.actor, NA_SE_EV_SLIDE_DOOR_OPEN);
-        this->actionFunc = func_809949C8;
+    if (this->unk_166 != 0) {
+        this->unk_166--;
+        return;
     }
+
+    // In first-person VR the unlocked grate waits for two physical hands. Outside that mode the
+    // negative return preserves the original automatic sliding animation exactly.
+    s32 vrDoor = VrGerudoDoor_Tick(this, play);
+    if (vrDoor >= 0) {
+        if (vrDoor == 2) {
+            this->actionFunc = func_809949C8;
+        }
+        return;
+    }
+    Audio_PlayActorSound2(&this->dyna.actor, NA_SE_EV_SLIDE_DOOR_OPEN);
+    this->actionFunc = func_809949C8;
 }
 
 void func_809949C8(DoorGerudo* this, PlayState* play) {

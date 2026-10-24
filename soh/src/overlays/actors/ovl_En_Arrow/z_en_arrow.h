@@ -27,6 +27,13 @@ typedef struct EnArrow {
     s16 vrDeferredMagicCost;
     u8 vrPhysicalThrow;
     Vec3f vrLaunchVelocity;
+    // Physical-bow release data belongs to this arrow, not to the player's later animation
+    // state. Horseback can keep a released arrow parented for several updates before launch.
+    u8 vrPhysicalBowShot;
+    u8 vrHorseBowShot;
+    f32 vrBowPower;
+    Vec3f vrBowAimOrigin;
+    Vec3f vrBowAimDir;
 } EnArrow; // size = 0x0260
 
 typedef enum {

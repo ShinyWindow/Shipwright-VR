@@ -366,6 +366,11 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
             VR_SetTextDisplayList(gfxCtx->overlayBuffer, 0.0f, 0.0f, 1.0f, 1.0f);
             VR_SetTextPanelLayout(CVarGetFloat("gVrTitleLogoWidth", 1.8f), CVarGetFloat("gVrTitleLogoDistance", 2.2f),
                                   CVarGetFloat("gVrTitleLogoHeight", 0.0f));
+        } else if (VrChest_AwardActive()) {
+            // With locomotion retained, the player naturally looks down at the open chest. Keep
+            // its reward text below the item/read line instead of at ordinary dialogue height.
+            VR_SetTextPanelLayout(CVarGetFloat("gVrTextWidth", 0.9f), CVarGetFloat("gVrTextDistance", 1.4f),
+                                  CVarGetFloat("gVrTextHeight", -0.15f) - 0.20f);
         } else {
             VR_SetTextPanelLayout(0.0f, 0.0f, 0.0f);
         }

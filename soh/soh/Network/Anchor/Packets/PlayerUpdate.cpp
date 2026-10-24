@@ -1,6 +1,8 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
+#include <vr_interface.h>
+#include <libultraship/bridge/consolevariablebridge.h>
 
 extern "C" {
 #include "macros.h"
@@ -68,6 +70,25 @@ void Anchor::SendPacket_PlayerUpdate() {
     payload["actionVar1"] = player->av1.actionVar1;
     payload["quiet"] = true;
 
+    // Optional VR pose extension. Hide Link Body is intentionally not transmitted: it is a local
+    // comfort setting, while remote clients always render a complete avatar. The server only needs
+    // to relay these extra JSON members; old clients safely ignore them.
+    const bool shareVr = CVarGetInteger("gVrAnchorShareTracking", 1) && VR_IsInitialized() &&
+                         VR_GetFirstPerson() && !VR_IsFlatScreen();
+    payload["vrTracked"] = shareVr;
+    if (shareVr) {
+        MtxF pose[3] = {};
+        const bool valid = VR_GetHeadMatrix(pose[0].mf) && VR_GetHandMatrix(VR_HAND_LEFT, pose[1].mf) &&
+                           VR_GetHandMatrix(VR_HAND_RIGHT, pose[2].mf);
+        payload["vrTracked"] = valid;
+        if (valid) {
+            for (int part = 0; part < 3; ++part) {
+                std::vector<float> matrix(&pose[part].mf[0][0], &pose[part].mf[0][0] + 16);
+                payload["vrPose"][part] = matrix;
+            }
+        }
+    }
+
     for (auto& [clientId, client] : clients) {
         if (client.sceneNum == gPlayState->sceneNum && client.online && client.isSaveLoaded && !client.self) {
             payload["targetClientId"] = clientId;
@@ -113,5 +134,19 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         client.unk_862 = payload.value("unk_862", (s16)0);
         client.unk_85C = payload.value("unk_85C", (f32)0);
         client.actionVar1 = payload.value("actionVar1", (s8)0);
+        client.vrTracked = payload.value("vrTracked", false);
+        if (client.vrTracked && payload.contains("vrPose") && payload["vrPose"].is_array() &&
+            payload["vrPose"].size() >= 3) {
+            for (int part = 0; part < 3; ++part) {
+                std::vector<float> matrix = payload["vrPose"][part].get<std::vector<float>>();
+                if (matrix.size() < 16) {
+                    client.vrTracked = false;
+                    break;
+                }
+                for (int i = 0; i < 16; ++i) (&client.vrPose[part].mf[0][0])[i] = matrix[i];
+            }
+        } else {
+            client.vrTracked = false;
+        }
     }
 }

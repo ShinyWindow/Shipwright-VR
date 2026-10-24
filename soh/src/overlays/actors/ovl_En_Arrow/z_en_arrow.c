@@ -89,6 +89,11 @@ void EnArrow_Init(Actor* thisx, PlayState* play) {
     this->vrDeferredMagicCost = 0;
     this->vrPhysicalThrow = false;
     this->vrLaunchVelocity = (Vec3f){ 0.0f, 0.0f, 0.0f };
+    this->vrPhysicalBowShot = false;
+    this->vrHorseBowShot = false;
+    this->vrBowPower = 0.0f;
+    this->vrBowAimOrigin = (Vec3f){ 0.0f, 0.0f, 0.0f };
+    this->vrBowAimDir = (Vec3f){ 0.0f, 0.0f, 0.0f };
 
     if (CVarGetInteger(CVAR_COSMETIC("Arrows.NormalPrimary.Changed"), 0)) {
         blureNormal.altEnvColor =
@@ -219,6 +224,32 @@ void EnArrow_Shoot(EnArrow* this, PlayState* play) {
             return;
         }
 
+        // SOH [VR] Mounted Link's draw path can rewrite the held horse arrow after the player
+        // limb callback applied physical aim. At detachment, restore the same latched two-hand
+        // line used by the aim dot before Actor_SetProjectileSpeed turns rotation into velocity.
+        // Outside a physical release AimSegment is false, leaving every vanilla shot untouched.
+        {
+            float vrAim[6];
+            if (this->vrPhysicalBowShot) {
+                vrAim[0] = this->vrBowAimOrigin.x;
+                vrAim[1] = this->vrBowAimOrigin.y;
+                vrAim[2] = this->vrBowAimOrigin.z;
+                vrAim[3] = this->vrBowAimDir.x;
+                vrAim[4] = this->vrBowAimDir.y;
+                vrAim[5] = this->vrBowAimDir.z;
+            }
+            if (this->vrPhysicalBowShot || VrArchery_TakeReleasedAim(vrAim)) {
+                Vec3f origin = { vrAim[0], vrAim[1], vrAim[2] };
+                Vec3f target = { origin.x + vrAim[3] * 100.0f, origin.y + vrAim[4] * 100.0f,
+                                 origin.z + vrAim[5] * 100.0f };
+                this->actor.world.pos = origin;
+                this->actor.world.rot.x = Math_Vec3f_Pitch(&origin, &target);
+                this->actor.world.rot.y = Math_Vec3f_Yaw(&origin, &target);
+                this->actor.world.rot.z = 0;
+                this->actor.shape.rot = this->actor.world.rot;
+            }
+        }
+
         switch (this->actor.params) {
             case ARROW_SEED:
                 Player_PlaySfx(&player->actor, NA_SE_IT_SLING_SHOT);
@@ -252,13 +283,14 @@ void EnArrow_Shoot(EnArrow* this, PlayState* play) {
             // vanilla shot; a partial draw leaves slower, falls from the start, and lives longer
             // so a weak arrow drops to the ground instead of vanishing mid-air.
             {
-                f32 vrPower = VrArchery_TakeBowShotPower();
+                f32 vrPower = this->vrPhysicalBowShot ? this->vrBowPower : VrArchery_TakeBowShotPower();
                 if (vrPower > 0.0f && vrPower < 0.99f) {
                     f32 vrWeak = (1.0f - vrPower) / 0.7f;
                     Actor_SetProjectileSpeed(&this->actor, 150.0f * vrPower);
                     this->timer = 12 + (s32)(12.0f * vrWeak);
                     this->actor.gravity = -1.0f * vrWeak;
                 }
+                this->vrPhysicalBowShot = false;
             }
         }
         // SOH [VR] Physical nuts retain vanilla impact/stun logic, but launch from
@@ -336,7 +368,11 @@ void EnArrow_Fly(EnArrow* this, PlayState* play) {
 
     if (this->timer < 7.2000003f) {
         // SOH [VR] Keep a weak physical-bow shot's stronger fall (vanilla arrows reach here at 0).
-        if (!((this->actor.params < ARROW_SEED) && (this->actor.gravity < -0.4f))) {
+        if (this->vrHorseBowShot) {
+            // VR horseback uses a world-space aim dot: keep its physical arrow on that exact
+            // line for the whole flight. On-foot and every non-VR arrow retain vanilla drop.
+            this->actor.gravity = 0.0f;
+        } else if (!((this->actor.params < ARROW_SEED) && (this->actor.gravity < -0.4f))) {
             this->actor.gravity = -0.4f;
         }
     }

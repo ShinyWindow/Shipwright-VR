@@ -19,6 +19,8 @@ bool sGripPrev[2] = { true, true }; // require a fresh press on entry/reset
 int sCarryHand = -1;                // hand that grabbed the current throwable, -1 = none
 int sObservedItem = -1;
 bool sReleaseHasGrip = false;
+Gfx sChuGuideDl[24];
+Vtx sChuGuideVtx[7];
 
 // Bombchu grab transform (VrPocket::Grab). The presented chu is a real model with an
 // orientation; grabbing it records where it sat relative to the hand (position offset and its
@@ -43,6 +45,18 @@ bool ChuCovered(Player* player) {
     return player->heldItemAction == PLAYER_IA_BOMBCHU && CVarGetInteger("gVrPhysBombchuDrop", 1);
 }
 
+// Grabbing the tenth bowling Bombchu changes the counter from 1 to -1 immediately. Keep the
+// physical adapter alive until that already-spawned final Bombchu leaves the hand; -1 forbids a
+// new preview, but must not strand the carried actor.
+bool BowlingChuInPlay(Player* player) {
+    if (!player || !ChuCovered(player) || !gPlayState || gPlayState->bombchuBowlingStatus == 0) {
+        return false;
+    }
+    return gPlayState->bombchuBowlingStatus > 0 ||
+           (player->heldActor && player->heldActor->id == ACTOR_EN_BOM_CHU &&
+            (player->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR));
+}
+
 // Record how the presented chu sits relative to the grabbing hand, in the hand's frame.
 void CaptureChuGrab(int hand) {
     sChuGrab.Clear();
@@ -58,13 +72,27 @@ bool CarriedChuPose(int hand, float position[3], float left[3], float up[3], flo
     return sChuGrab.Replay(hand, position, left, up, forward);
 }
 
+// Bombchu aim follows the player's view horizontally. A hand-directed crawl required awkward
+// wrist gestures and often put the guide outside the player's view.
+bool HeadChuForward(float forward[3]) {
+    float eye[3], up[3];
+    VR_GetCameraPose(eye, forward, up);
+    const float horizontal = sqrtf(SQ(forward[0]) + SQ(forward[2]));
+    if (horizontal < 0.01f) return false;
+    forward[0] /= horizontal;
+    forward[1] = 0.0f;
+    forward[2] /= horizontal;
+    return true;
+}
+
 // Bombchu release intent: the chu crawls where its nose was pointing at the moment of release
 // (the carried model's forward, flattened to horizontal). Untracked controller or a nose
 // pointing straight up/down = no intent; the actor uses Link's facing when it lands.
 void SetChuCrawlYaw(EnBomChu* chu, int hand) {
-    float position[3], left[3], up[3], forward[3];
+    float forward[3];
+    (void)hand;
     chu->vrHasCrawlYaw = false;
-    if (!CarriedChuPose(hand, position, left, up, forward)) return;
+    if (!HeadChuForward(forward)) return;
     if (forward[0] * forward[0] + forward[2] * forward[2] < 1e-4f) return;
     // Same convention as Player_VrReleaseItem: rot.y = 0 is +Z, sin(rot.y) is the X component.
     chu->vrCrawlYaw = Math_Atan2S(forward[2], forward[0]);
@@ -99,11 +127,16 @@ bool HandNearPreview(int hand) {
 }
 
 extern "C" bool VrItemThrow_Active(Player* player) {
-    return VrItemSelect_ModeActive() && CVarGetInteger("gVrPhysicalItemThrows", 1) && player &&
+    const bool bowlingBombchu = BowlingChuInPlay(player);
+    const bool selectorContext = VrItemSelect_ModeActive() ||
+                                 (bowlingBombchu && CVarGetInteger("gVrItemSelect", 1) && VR_IsInitialized() &&
+                                  !VrPause_InputMenuMode());
+    return selectorContext && CVarGetInteger("gVrPhysicalItemThrows", 1) && player &&
            player->actor.category == ACTORCAT_PLAYER &&
            (player->heldItemAction == PLAYER_IA_BOMB || player->heldItemAction == PLAYER_IA_DEKU_NUT ||
             ChuCovered(player)) &&
-           gPlayState && gPlayState->bombchuBowlingStatus == 0 && gPlayState->shootingGalleryStatus == 0 &&
+           gPlayState && (gPlayState->bombchuBowlingStatus == 0 || bowlingBombchu) &&
+           gPlayState->shootingGalleryStatus == 0 &&
            !(player->stateFlags1 & (PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_IN_WATER));
 }
 
@@ -124,11 +157,84 @@ extern "C" bool VrItemThrow_PreviewIsModel(void) {
     return player && ChuCovered(player) && VrItemThrow_PreviewPosition(position);
 }
 
+Vtx ChuGuideVtx(float x, float z, u8 alpha) {
+    Vtx v = {};
+    v.v.ob[0] = (s16)lroundf(x);
+    v.v.ob[2] = (s16)lroundf(z);
+    v.v.cn[0] = 255;
+    v.v.cn[1] = 210;
+    v.v.cn[2] = 40;
+    v.v.cn[3] = alpha;
+    return v;
+}
+
+void DrawChuAimGuide(Player* player) {
+    if (!VR_IsInitialized() || !VR_GetFirstPerson() || VR_IsFlatScreen() ||
+        !CVarGetInteger("gVrBombchuAimGuide", 1) || !player || !HasThrowable(player) ||
+        player->heldActor->id != ACTOR_EN_BOM_CHU) return;
+
+    float forward[3];
+    if (!HeadChuForward(forward)) return;
+    const float right[3] = { forward[2], 0.0f, -forward[0] };
+
+    Vec3f floorProbe = { player->actor.world.pos.x, player->actor.world.pos.y + 100.0f,
+                         player->actor.world.pos.z };
+    CollisionPoly* floorPoly = nullptr;
+    s32 bgId = BGCHECK_SCENE;
+    const float floorY = BgCheck_EntityRaycastFloor3(&gPlayState->colCtx, &floorPoly, &bgId, &floorProbe);
+    if (floorY == BGCHECK_Y_MIN) return;
+
+    const float scale = WorldScale();
+    const float length = scale * 3.0f;
+    const float halfWidth = fmaxf(scale * 0.012f, 0.5f);
+    const float headWidth = halfWidth * 5.0f;
+    const float headLength = fmaxf(scale * 0.18f, 6.0f);
+    sChuGuideVtx[0] = ChuGuideVtx(-halfWidth, 0.0f, 170);
+    sChuGuideVtx[1] = ChuGuideVtx(halfWidth, 0.0f, 170);
+    sChuGuideVtx[2] = ChuGuideVtx(-halfWidth, length - headLength, 210);
+    sChuGuideVtx[3] = ChuGuideVtx(halfWidth, length - headLength, 210);
+    sChuGuideVtx[4] = ChuGuideVtx(-headWidth, length - headLength, 230);
+    sChuGuideVtx[5] = ChuGuideVtx(headWidth, length - headLength, 230);
+    sChuGuideVtx[6] = ChuGuideVtx(0.0f, length, 255);
+
+    MtxF guide = {};
+    guide.mf[0][0] = right[0]; guide.mf[0][1] = right[1]; guide.mf[0][2] = right[2];
+    guide.mf[1][0] = 0.0f;     guide.mf[1][1] = 1.0f;     guide.mf[1][2] = 0.0f;
+    guide.mf[2][0] = forward[0]; guide.mf[2][1] = 0.0f;   guide.mf[2][2] = forward[2];
+    guide.mf[3][0] = player->actor.world.pos.x;
+    guide.mf[3][1] = floorY + 1.0f;
+    guide.mf[3][2] = player->actor.world.pos.z;
+    guide.mf[3][3] = 1.0f;
+    Matrix_Put(&guide);
+    Mtx* guideMtx = MATRIX_NEWMTX(gPlayState->state.gfxCtx);
+
+    Gfx* p = sChuGuideDl;
+    gDPPipeSync(p++);
+    gDPSetCycleType(p++, G_CYC_1CYCLE);
+    // Always visible: the held Bombchu and nearby floor geometry must not hide the guide.
+    gDPSetRenderMode(p++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+    gDPSetCombineMode(p++, G_CC_SHADE, G_CC_SHADE);
+    gSPTexture(p++, 0, 0, 0, G_TX_RENDERTILE, G_OFF);
+    gSPClearGeometryMode(p++, G_CULL_BOTH | G_LIGHTING | G_FOG | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
+    gSPClearGeometryMode(p++, G_ZBUFFER);
+    gSPSetGeometryMode(p++, G_SHADE | G_SHADING_SMOOTH);
+    gSPMatrix(p++, guideMtx, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPVertex(p++, (uintptr_t)&sChuGuideVtx[0], 7, 0);
+    gSP2Triangles(p++, 0, 1, 2, 0, 1, 3, 2, 0);
+    gSP1Triangle(p++, 4, 5, 6, 0);
+    gSPEndDisplayList(p++);
+
+    OPEN_DISPS(gPlayState->state.gfxCtx);
+    gSPDisplayList(POLY_XLU_DISP++, sChuGuideDl);
+    CLOSE_DISPS(gPlayState->state.gfxCtx);
+}
+
 // Preview draw: the chu as it would appear when used, shrunk by gVrChuPreviewScale, sitting at
 // the preview point, level, nose away from the player. Own OnPlayDrawEnd hook with minimal
 // gates (same pattern as the bottle mouth marker). extern "C" linkage is load-bearing for the
 // block-scope FrameInterpolation declarations inside OPEN_DISPS (see VrItemSelect_Draw).
 extern "C" void VrItemThrow_DrawPreview(void) {
+    if (gPlayState) DrawChuAimGuide(GET_PLAYER(gPlayState));
     if (!VrItemThrow_PreviewIsModel()) return;
     float position[3], left[3], up[3], forward[3];
     if (!VrItemThrow_PreviewPosition(position) || !VrPocket::Axes(left, up, forward)) return;
@@ -157,8 +263,10 @@ extern "C" void VrItemThrow_DrawPreview(void) {
 }
 
 extern "C" bool VrItemThrow_PreviewPosition(float* position) {
-    if (!gPlayState || !VrItemThrow_Active(GET_PLAYER(gPlayState)) ||
-        !VrItemSelect_SelectionAllowed() || GET_PLAYER(gPlayState)->heldActor) {
+    Player* player = gPlayState ? GET_PLAYER(gPlayState) : nullptr;
+    const bool bowlingBombchu = player && ChuCovered(player) && gPlayState->bombchuBowlingStatus > 0;
+    if (!gPlayState || !VrItemThrow_Active(player) || (!VrItemSelect_SelectionAllowed() && !bowlingBombchu) ||
+        player->heldActor) {
         return false;
     }
     return VrPocket::Point(position);
@@ -209,7 +317,8 @@ extern "C" void VrItemThrow_UpdateCarryPose(Player* player) {
 }
 
 extern "C" void VrItemThrow_Tick(PlayState* play, Player* player) {
-    if (!VrItemThrow_Active(player) || !VrItemSelect_SelectionAllowed() ||
+    const bool bowlingBombchu = BowlingChuInPlay(player);
+    if (!VrItemThrow_Active(player) || (!VrItemSelect_SelectionAllowed() && !bowlingBombchu) ||
         play->pauseCtx.state != 0 || player->unk_6AD != 0 || player->heldItemAction != player->itemAction) {
         VrItemThrow_Reset();
         return;

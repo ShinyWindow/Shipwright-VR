@@ -661,6 +661,17 @@ extern "C" void VrCarry_Tick(PlayState* play, Player* player) {
     }
     sDebug.gate = 0;
 
+    // Pulling a Bomb Flower replaces the rooted flower actor with a newly spawned carried body.
+    // Both actors are ACTOR_EN_BOMBF, and func_8002F5C4 transfers the player's parent/heldActor
+    // links to the new one. Keep the physical grab attached to that replacement instead of
+    // mistaking the actor swap for a vanilla release and abandoning hand-driven throwing.
+    if (sHeld != nullptr && sHeld->id == ACTOR_EN_BOMBF && player->heldActor != nullptr &&
+        player->heldActor != sHeld && player->heldActor->id == ACTOR_EN_BOMBF &&
+        player->heldActor->parent == &player->actor && (player->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR)) {
+        sHeld = player->heldActor;
+        sHeld->bgCheckFlags &= 0xFF00;
+    }
+
     // Ours no longer (thrown by A/B, switched away, burst, exploded, scene change): forget it.
     if (sHeld != nullptr && (player->heldActor != sHeld || sHeld->parent != &player->actor ||
                              !(player->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) || sHeld->update == nullptr)) {

@@ -1,5 +1,6 @@
 #include "Anchor.h"
 #include "soh/Enhancements/nametag.h"
+#include <libultraship/bridge/consolevariablebridge.h>
 
 extern "C" {
 #include "macros.h"
@@ -254,4 +255,30 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
     // asserts. Set the id back to ACTOR_PLAYER so that `numLoaded` will be decremented
     // correctly.
     actor->id = ACTOR_PLAYER;
+}
+
+// Called from the normal Player limb renderer after it selects the dummy's ordinary full-body
+// display lists. Replacing only these matrices preserves the complete torso/legs/gear while the
+// remote headset and controllers drive the visible head and hands. Non-VR/older peers fall back
+// to their transmitted skeletal animation because vrTracked remains false.
+extern "C" s32 Anchor_ApplyRemoteVrLimbPose(Player* player, s32 limbIndex) {
+    if (player == nullptr || !CVarGetInteger("gVrAnchorShowTracking", 1) || Anchor::Instance == nullptr) return false;
+    const uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(&player->actor);
+    if (clientId == 0 || !Anchor::Instance->clients.contains(clientId)) return false;
+    AnchorClient& client = Anchor::Instance->clients[clientId];
+    if (!client.vrTracked) return false;
+    int part = -1;
+    if (limbIndex == PLAYER_LIMB_HEAD) part = 0;
+    else if (limbIndex == PLAYER_LIMB_L_HAND) part = 1;
+    else if (limbIndex == PLAYER_LIMB_R_HAND) part = 2;
+    if (part < 0) return false;
+    Matrix_Put(&client.vrPose[part]);
+    if (part == 0) {
+        // The OpenXR head frame has unit axes; Link's authored head geometry expects actor scale.
+        Matrix_Scale(player->actor.scale.x, player->actor.scale.y, player->actor.scale.z, MTXMODE_APPLY);
+        Matrix_Translate(CVarGetFloat("gVrAnchorHeadOffsetX", 0.0f),
+                         CVarGetFloat("gVrAnchorHeadOffsetY", -180.0f),
+                         CVarGetFloat("gVrAnchorHeadOffsetZ", 0.0f), MTXMODE_APPLY);
+    }
+    return true;
 }

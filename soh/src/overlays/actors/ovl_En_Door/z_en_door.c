@@ -12,6 +12,7 @@
 #include "objects/object_haka_door/object_haka_door.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
@@ -72,6 +73,7 @@ static AnimationHeader* D_809FCECC[] = { &gDoorAdultOpeningLeftAnim, &gDoorChild
 static u8 sDoorAnimOpenFrames[] = { 25, 25, 25, 25 };
 
 static u8 sDoorAnimCloseFrames[] = { 60, 70, 60, 70 };
+static s32 sVrDoorSecondFacePass = false;
 
 static Gfx* D_809FCEE4[5][2] = {
     { gDoorLeftDL, gDoorRightDL },
@@ -198,6 +200,26 @@ void EnDoor_Idle(EnDoor* this, PlayState* play) {
     s16 phi_v0;
 
     doorType = this->actor.params >> 7 & 7;
+    if (VrKeys_TryEnDoor(this, play)) {
+        // Physical key use removes the lock but deliberately leaves the door leaf closed. The
+        // now-unlocked DOOR_LOCKED actor becomes eligible for VrDoor_Tick below, so opening it is
+        // a separate handle grab rather than an automatic consequence of turning the key.
+        if (this->lockTimer != 0) {
+            if (GameInteractor_Should(VB_CONSUME_SMALL_KEY, true, this)) {
+                gSaveContext.inventory.dungeonKeys[gSaveContext.mapIndex]--;
+                Flags_SetSwitch(play, this->actor.params & 0x3F);
+            }
+            Audio_PlayActorSound2(&this->actor, NA_SE_EV_CHAIN_KEY_UNLOCK);
+            GameInteractor_ExecuteOnDungeonKeyUsedHooks(gSaveContext.mapIndex);
+            this->lockTimer = 0;
+            this->playerIsOpening = 0;
+        }
+    }
+    // SOH [VR] An ordinary unlocked handle door may be owned directly by a motion hand. Locked,
+    // checkable, ajar and non-VR doors fall straight through to the original behavior.
+    if (VrDoor_Tick(this, play)) {
+        return;
+    }
     Actor_WorldToActorCoords(&this->actor, &playerPosRelToDoor, &player->actor.world.pos);
     if (this->playerIsOpening != 0) {
         this->actionFunc = EnDoor_Open;
@@ -326,9 +348,15 @@ s32 EnDoor_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* 
         transitionEntry = &play->transiActorCtx.list[(u16)this->actor.params >> 0xA];
         rot->z += this->actor.world.rot.y;
         if ((play->roomCtx.prevRoom.num >= 0) || (transitionEntry->sides[0].room == transitionEntry->sides[1].room)) {
+            Vec3f vrFaceEye = play->view.eye;
+            VrDoor_StableFaceView(this, &vrFaceEye.x);
             phi_v0_2 = ((this->actor.shape.rot.y + this->skelAnime.jointTable[3].z) + rot->z) -
-                       Math_Vec3f_Yaw(&play->view.eye, &this->actor.world.pos);
-            *dList = (ABS(phi_v0_2) < 0x4000) ? temp_a2[0] : temp_a2[1];
+                       Math_Vec3f_Yaw(&vrFaceEye, &this->actor.world.pos);
+            s32 faceIndex = (ABS(phi_v0_2) < 0x4000) ? 0 : 1;
+            if (sVrDoorSecondFacePass && VrDoor_IsPhysicalActive(this)) {
+                faceIndex ^= 1;
+            }
+            *dList = temp_a2[faceIndex];
         } else {
             phi_v0 = this->unk_192;
             if (transitionEntry->sides[0].room != this->actor.room) {
@@ -348,6 +376,14 @@ void EnDoor_Draw(Actor* thisx, PlayState* play) {
 
         Gfx_SetupDL_25Opa(play->state.gfxCtx);
         SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnDoor_OverrideLimbDraw, NULL, &this->actor);
+        // SOH [VR] The original renderer submits only the door face selected for a third-person
+        // camera. At arm's length in VR that selection can clip away half the opened leaf, so an
+        // active physical door submits the complementary face as a second pass.
+        if (VrDoor_IsPhysicalActive(this)) {
+            sVrDoorSecondFacePass = true;
+            SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnDoor_OverrideLimbDraw, NULL, &this->actor);
+            sVrDoorSecondFacePass = false;
+        }
         if (this->actor.world.rot.y != 0) {
             if (this->actor.world.rot.y > 0) {
                 gSPDisplayList(POLY_OPA_DISP++, gDoorRightDL);

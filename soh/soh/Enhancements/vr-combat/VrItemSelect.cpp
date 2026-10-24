@@ -91,8 +91,14 @@ int sRestoreItem = -1;
 // Selector mode last tick — the falling edge (third person, flat screen, F9) clears Link's
 // hands per the behavior plan; the selection fiction belongs to VR first person.
 bool sModeWasInPlay = false;
+// Bombchu Bowling supplies its temporary item through B and may use a non-first-person camera.
+// This latch is separate because the selector state resets outside VR first person.
+bool sBowlingTriggerArmed[2] = { false, false };
 // >0 while a textbox is up and for a few ticks after it closes (see the put-away guard).
 int sTextboxRecentTicks = 0;
+// Transient mounted-control mode. This must never be persisted: leaving Epona, loading a
+// save, or leaving selector mode always returns the selector button to its normal meaning.
+bool sHorseBowEnabled = false;
 
 int SwordHand() {
     return CVarGetInteger("gVrLeftHanded", 0) ? VR_HAND_LEFT : VR_HAND_RIGHT;
@@ -183,6 +189,23 @@ bool SwapChordHeld() {
     // hands is not a request for the sword.
     if ((mask & VR_BTN_GRIP) && (VrCarry_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
                                  VrCarry_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
+        return false;
+    }
+    if ((mask & VR_BTN_GRIP) && (VrDoor_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrDoor_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
+        return false;
+    }
+    // Shutter interactions also use a deliberate two-hand grip. They already consume the
+    // controller bindings in PadMgr; exclude them here as well so the selector's independent
+    // two-grip quick-swap cannot draw the sword and shield on the same press.
+    if ((mask & VR_BTN_GRIP) && (VrJabuDoor_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrJabuDoor_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP) ||
+                                 VrShutter_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrShutter_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
+        return false;
+    }
+    if ((mask & VR_BTN_GRIP) && (VrKeys_GripConsumed(VR_HAND_LEFT, VR_BTN_GRIP) ||
+                                 VrKeys_GripConsumed(VR_HAND_RIGHT, VR_BTN_GRIP))) {
         return false;
     }
     // And grips holding a climbable wall (or on one, about to): climbing hand over hand squeezes both.
@@ -287,7 +310,41 @@ void QuickSwapTick() {
 }
 
 void ItemSelectTick() {
+    const bool bowlingTriggerMode = CVarGetInteger("gVrItemSelect", 1) && VR_IsInitialized() &&
+                                    gPlayState != NULL && gPlayState->bombchuBowlingStatus > 0 &&
+                                    !VrPause_InputMenuMode();
+    Player* livePlayer = gPlayState != NULL ? GET_PLAYER(gPlayState) : NULL;
+    const bool horseSelectorMode = CVarGetInteger("gVrItemSelect", 1) && VR_IsInitialized() &&
+                                   GameInteractor::IsSaveLoaded(true) && !VrPause_InputMenuMode() &&
+                                   livePlayer != NULL && (livePlayer->stateFlags1 & PLAYER_STATE1_ON_HORSE);
+    for (int hand = 0; hand < 2; ++hand) {
+        if (!bowlingTriggerMode) {
+            sBowlingTriggerArmed[hand] = false;
+        } else if (!(VR_GetControllerButton(hand) & VR_BTN_TRIGGER)) {
+            sBowlingTriggerArmed[hand] = true;
+        }
+    }
+    // Epona has a dedicated two-state selector: the configured menu input toggles physical
+    // bow control instead of opening the radial item menu. Do not run the ordinary out-of-mode
+    // reset here: that reset used to erase sHorseBowEnabled on every mounted frame, handing the
+    // bow straight back to native horseback archery (button fire and animation/wrist roll).
+    if (horseSelectorMode) {
+        sModeWasInPlay = false;
+        CloseSelector();
+        sSelection.CancelRequest();
+        return;
+    }
     if (!SelectorModeInPlay()) {
+        // Bombchu Bowling deliberately keeps the physical Bombchu pocket alive while its
+        // minigame camera is outside ordinary selector mode. The normal full reset includes
+        // VrItemThrow_Reset(); doing that every tick pins both grip histories to "pressed" and
+        // makes it impossible for VrItemThrow_Tick to observe a fresh grab.
+        if (bowlingTriggerMode) {
+            sModeWasInPlay = false;
+            CloseSelector();
+            sSelection.CancelRequest();
+            return;
+        }
         if (sModeWasInPlay && gPlayState != NULL && GameInteractor::IsSaveLoaded(true)) {
             // Falling edge: leaving VR first person clears Link's hands (behavior plan).
             Player_VrModeExitClearHands(gPlayState, GET_PLAYER(gPlayState));
@@ -633,6 +690,35 @@ extern "C" bool VrItemSelect_ConsumesInput(int32_t vrHand, uint16_t vrBtnMask) {
     return vrHand == SelectorHand() && (vrBtnMask & SelectorMask()) != 0;
 }
 
+extern "C" bool VrItemSelect_TakeHorseBowToggle(void) {
+    static bool sSelectorWasDown = false;
+    // The title-screen demo also places Link on Epona. Never treat that scripted rider as a
+    // playable horse state: controller activation can report a transient button edge while the
+    // headset wakes, and changing the demo player's equipment corrupts its scripted state.
+    const bool active = CVarGetInteger("gVrItemSelect", 1) && VR_IsInitialized() && gPlayState != NULL &&
+                        GameInteractor::IsSaveLoaded(true) && !VrPause_InputMenuMode() && !OcarinaInPlay();
+    Player* player = active ? GET_PLAYER(gPlayState) : NULL;
+    const bool mounted = player != NULL && (player->stateFlags1 & PLAYER_STATE1_ON_HORSE);
+    const bool ownsBow = INV_CONTENT(SLOT_BOW) == ITEM_BOW &&
+                         (LINK_IS_ADULT || CVarGetInteger(CVAR_CHEAT("TimelessEquipment"), 0));
+    const bool ready = mounted && ownsBow && player->heldItemAction == player->itemAction &&
+                       !(player->stateFlags1 &
+                         (PLAYER_STATE1_IN_CUTSCENE | PLAYER_STATE1_START_CHANGING_HELD_ITEM));
+    const bool down = ready && (VR_GetControllerButton(SelectorHand()) & SelectorMask()) != 0;
+    const bool pressed = down && !sSelectorWasDown;
+    sSelectorWasDown = down;
+    if (!mounted || !ownsBow) {
+        sHorseBowEnabled = false;
+    } else if (pressed) {
+        sHorseBowEnabled = !sHorseBowEnabled;
+    }
+    return pressed;
+}
+
+extern "C" bool VrItemSelect_HorseBowEnabled(void) {
+    return sHorseBowEnabled;
+}
+
 extern "C" bool VrOcarina_InPlay(void) {
     return OcarinaInPlay();
 }
@@ -697,9 +783,18 @@ extern "C" void VrItemSelect_Reset(void) {
     // where neither the pending restore nor the tracked loadout is trustworthy anymore.
     sRestoreSlot = VrItemSelectionState::NoRequest;
     sStableSlot = VrItemSelectionState::NoRequest;
+    sHorseBowEnabled = false;
 }
 
 extern "C" uint16_t VrItemSelect_TriggerItemMask(int32_t vrHand) {
+    // The VR controller profile reserves both triggers before regular bindings are applied.
+    // Bowling's temporary Bombchu is not held by either hand, so feed its B action here even
+    // when the minigame camera has taken the game out of VR first-person selector mode.
+    if (gPlayState != NULL && CVarGetInteger("gVrItemSelect", 1) && VR_IsInitialized() &&
+        !VrPause_InputMenuMode() && gPlayState->bombchuBowlingStatus > 0) {
+        Player* player = GET_PLAYER(gPlayState);
+        return !VrItemThrow_Active(player) && vrHand == SwordHand() && sBowlingTriggerArmed[vrHand] ? BTN_B : 0;
+    }
     if (!SelectorModeInPlay() || gPlayState == NULL || !sSelection.TriggerArmed(vrHand)) {
         return 0;
     }
@@ -779,7 +874,7 @@ static void RegisterVrItemSelect() {
     // other message) must not strip the bottle from Link's hand. Guarded while a message is up
     // and for a few ticks after it closes (the button re-enable lags the close by a frame or two).
     COND_VB_SHOULD(VB_PUTAWAY_BECAUSE_DISABLED_ITEM_BUTTONS, CVarGetInteger("gVrItemSelect", 1), {
-        if (SelectorModeInPlay() && sTextboxRecentTicks > 0) {
+        if ((SelectorModeInPlay() && sTextboxRecentTicks > 0) || VrItemSelect_HorseBowEnabled()) {
             *should = false;
         }
     });

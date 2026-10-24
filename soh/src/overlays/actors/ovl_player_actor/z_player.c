@@ -320,6 +320,8 @@ void Player_Action_8084E368(Player* this, PlayState* play);
 void Player_Action_8084E3C4(Player* this, PlayState* play);
 void Player_Action_8084E604(Player* this, PlayState* play);
 void Player_Action_8084E6D4(Player* this, PlayState* play);
+void Player_VrChestStartAward(PlayState* play, Player* this, EnBox* chest, GetItemEntry* entry);
+void Player_VrChestAwardUpdate(PlayState* play, Player* this);
 void Player_Action_8084E9AC(Player* this, PlayState* play);
 void Player_Action_8084EAC0(Player* this, PlayState* play);
 void Player_Action_SwingBottle(Player* this, PlayState* play);
@@ -2697,6 +2699,34 @@ void Player_StartChangingHeldItem(Player* this, PlayState* play) {
 }
 
 void Player_UpdateItems(Player* this, PlayState* play) {
+    // Tick even while dismounted so the transient horse mode is cleared immediately.
+    const bool horseBowTogglePressed = VrItemSelect_TakeHorseBowToggle();
+    // SOH [VR] The item compass cannot be used on Epona. Its button becomes an explicit bow
+    // toggle there: one persistent mode equips the horse's B-slot bow and routes it through
+    // the same physical nock/pull/release path used on foot; the other puts it away and returns
+    // the hands to horse control. The selector edge itself must never be interpreted as firing.
+    if ((this->actor.category == ACTORCAT_PLAYER) && (this->stateFlags1 & PLAYER_STATE1_ON_HORSE) &&
+        this->heldItemAction == this->itemAction &&
+        !(this->stateFlags1 & (PLAYER_STATE1_IN_CUTSCENE | PLAYER_STATE1_START_CHANGING_HELD_ITEM)) &&
+        horseBowTogglePressed) {
+        Player_VrSelectItem(play, this, VrItemSelect_HorseBowEnabled() ? 0 : -1);
+        // Do not let this same controller edge fall through to ordinary item processing and
+        // become an immediate bow use. StartChangingHeldItem will run on the next update.
+        sUseHeldItem = sHeldItemButtonIsHeldDown = false;
+        VrArchery_Reset();
+        return;
+    }
+    // SOH [VR] Bombchu Bowling owns the B slot for the whole round. Selector mode normally
+    // forbids buttons from changing held equipment, so passively put the forced minigame item
+    // in Link's hand as soon as ordinary item-changing state permits it. This uses the passive
+    // selector transition so no actor or fuse exists until the player grips the VR preview.
+    if (VR_IsInitialized() && CVarGetInteger("gVrItemSelect", 1) && play->bombchuBowlingStatus > 0 &&
+        this->actor.category == ACTORCAT_PLAYER && this->heldItemAction != PLAYER_IA_BOMBCHU &&
+        this->heldItemAction == this->itemAction && this->csAction == 0 &&
+        !(this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_CUTSCENE |
+                              PLAYER_STATE1_START_CHANGING_HELD_ITEM))) {
+        Player_VrSelectItem(play, this, 0);
+    }
     // SOH [VR] Selection is an explicit request, not an item-button press. Resolve it
     // before the upper action can interpret a release as firing the old item.
     if (VrItemSelect_ModeActive() && this->actor.category == ACTORCAT_PLAYER &&
@@ -2719,6 +2749,8 @@ void Player_UpdateItems(Player* this, PlayState* play) {
     VrLens_Tick(play, this);
     // SOH [VR] Physical masks: pocket / hand; on and off at the face (currentMask stays vanilla's).
     VrMask_Tick(play, this);
+    // SOH [VR] Physical dungeon keys: pull the current dungeon's key from the left wrist HUD.
+    VrKeys_Tick(play, this);
     // SOH [VR] Bottle pour gesture (inverted + three shakes) commits contents through the
     // item button's own use path from this same boundary.
     VrBottle_Tick(play, this);
@@ -3073,8 +3105,10 @@ s32 func_80834EB8(Player* this, PlayState* play) {
     // aim with the HAND in VR, so the standstill first-person aim stance is pointless — every
     // aim takes the Z-target-style path instead (upper body aims, legs keep walking; the
     // kinematic stick movement stays live because the main action remains locomotion).
-    // Shooting galleries keep their own stock aiming mode.
-    if (VR_IsInitialized() && VR_GetFirstPerson() && (play->shootingGalleryStatus == 0)) {
+    // Physical archery uses the same free motion-hand posture in shooting galleries as it does
+    // everywhere else; only the gallery's ammo, targets and scoring remain special.
+    if ((VR_IsInitialized() && VR_GetFirstPerson() && (play->shootingGalleryStatus == 0)) ||
+        VrArchery_Covers(this)) {
         return 1;
     }
     if ((this->unk_6AD == 0) || (this->unk_6AD == 2)) {
@@ -3287,7 +3321,7 @@ s32 func_808353D8(Player* this, PlayState* play) {
         // path lowers the bow here, and the lower-animation window ate the next press — the
         // "fires once then goes dead" bug.
         if (Player_IsZTargeting(this) || (this->unk_6AD != 0) || (this->stateFlags1 & PLAYER_STATE1_FIRST_PERSON) ||
-            (VR_IsInitialized() && VR_GetFirstPerson())) {
+            (VR_IsInitialized() && VR_GetFirstPerson()) || VrArchery_Covers(this)) {
             if (this->unk_834 == 0) {
                 this->unk_834++;
             }
@@ -3715,27 +3749,51 @@ int32_t Player_VrSelectItem(PlayState* play, Player* this, int32_t slot) {
     s8 itemAction;
     Actor* held;
     bool explosive;
+    bool underwaterHookshotTransition;
+    bool bowlingBombchu;
+    bool horseBowToggle;
 
-    if (!VrItemSelect_SelectionAllowed() || this->actor.category != ACTORCAT_PLAYER ||
-        slot < -1 || slot > 3 || gSaveContext.health == 0 || this->csAction != 0 ||
-        play->shootingGalleryStatus != 0 || play->bombchuBowlingStatus != 0 ||
-        play->activeCamera != CAM_ID_MAIN || gSaveContext.minigameState == 1 ||
+    if (slot < -1 || slot > 3) {
+        return false;
+    }
+
+    // The mounted HUD presents the bow on B without replacing the save file's real B item
+    // (normally the sword). Resolve this VR-only passive request explicitly; asking the ordinary
+    // button resolver for slot 0 would select the sword and fail the horse-bow classification.
+    horseBowToggle = VR_IsInitialized() && CVarGetInteger("gVrItemSelect", 1) &&
+                     (this->stateFlags1 & PLAYER_STATE1_ON_HORSE) && (slot == -1 || slot == 0);
+    item = slot < 0 ? ITEM_NONE : horseBowToggle ? ITEM_BOW : Player_GetItemOnButton(play, slot);
+    itemAction = Player_ItemToItemAction(item);
+    bowlingBombchu = play->bombchuBowlingStatus > 0 && slot == 0 && itemAction == PLAYER_IA_BOMBCHU;
+    underwaterHookshotTransition =
+        (this->stateFlags1 & PLAYER_STATE1_IN_WATER) && (this->currentBoots == PLAYER_BOOTS_IRON) &&
+        (this->actor.bgCheckFlags & BGCHECKFLAG_GROUND) &&
+        ((itemAction == PLAYER_IA_HOOKSHOT) || (itemAction == PLAYER_IA_LONGSHOT) ||
+         ((itemAction == PLAYER_IA_NONE) && Player_HoldsHookshot(this)));
+
+    if ((!VrItemSelect_SelectionAllowed() && !bowlingBombchu && !horseBowToggle) ||
+        this->actor.category != ACTORCAT_PLAYER ||
+        gSaveContext.health == 0 || this->csAction != 0 ||
+        play->shootingGalleryStatus != 0 || (play->bombchuBowlingStatus != 0 && !bowlingBombchu) ||
+        (!bowlingBombchu &&
+         (play->activeCamera != CAM_ID_MAIN || gSaveContext.minigameState == 1)) ||
         play->pauseCtx.state != 0 || this->unk_6AD != 0 ||
-        (this->stateFlags1 & (PLAYER_STATE1_START_CHANGING_HELD_ITEM | PLAYER_STATE1_IN_WATER |
-                             PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_DEAD | PLAYER_STATE1_CLIMBING_LADDER |
-                             PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_HANGING_OFF_LEDGE)) ||
-        (this->stateFlags3 & PLAYER_STATE3_FLYING_WITH_HOOKSHOT) || this->actor.parent != NULL ||
+        (this->stateFlags1 & (PLAYER_STATE1_START_CHANGING_HELD_ITEM | PLAYER_STATE1_DEAD |
+                             PLAYER_STATE1_CLIMBING_LADDER | PLAYER_STATE1_CLIMBING_LEDGE |
+                             PLAYER_STATE1_HANGING_OFF_LEDGE)) ||
+        ((this->stateFlags1 & PLAYER_STATE1_IN_WATER) && !underwaterHookshotTransition) ||
+        (this->stateFlags3 & PLAYER_STATE3_FLYING_WITH_HOOKSHOT) ||
+        (this->actor.parent != NULL && !horseBowToggle) ||
         this->heldItemAction != this->itemAction ||
         this->upperActionFunc == Player_UpperAction_ChangeHeldItem) {
         return false;
     }
 
-    item = slot < 0 ? ITEM_NONE : Player_GetItemOnButton(play, slot);
     // Disabled/empty buttons must not become a way around vanilla restrictions.
-    if (slot >= 0 && (item >= ITEM_NONE_FE || item != VrItemSelect_PendingItem())) {
+    if (slot >= 0 &&
+        (item >= ITEM_NONE_FE || (!bowlingBombchu && !horseBowToggle && item != VrItemSelect_PendingItem()))) {
         return 2;
     }
-    itemAction = Player_ItemToItemAction(item);
     if (itemAction < PLAYER_IA_NONE || itemAction >= PLAYER_IA_MAX) {
         return 2;
     }
@@ -3900,6 +3958,13 @@ bool Player_VrGrabItem(PlayState* play, Player* this) {
         }
     }
     if (this->heldActor == NULL) return false;
+    if (this->heldActor->id == ACTOR_EN_BOM_CHU) {
+        // SOH [VR] The physical interaction is slower than a button press: allow a longer fuse
+        // only for Bombchus committed through this VR grab path. Six seconds (120 ticks) is
+        // vanilla; ordinary button use and all non-VR gameplay never pass through this code.
+        const f32 fuseSeconds = CLAMP(CVarGetFloat("gVrBombchuFuseSeconds", 8.0f), 6.0f, 20.0f);
+        ((EnBomChu*)this->heldActor)->timer = (s16)(fuseSeconds * 20.0f + 0.5f);
+    }
     this->heldItemId = selectedItem; // explosive initialization may clear it while detaching
     Player_SetUpperActionFunc(this, Player_UpperAction_CarryActor);
     LinkAnimation_PlayLoop(play, &this->upperSkelAnime, &gPlayerAnim_link_normal_carryB_wait);
@@ -8070,11 +8135,15 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
                 this->getItemId = GI_NONE;
                 this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
             }
-        } else if (CHECK_BTN_ALL(sControlInput->press.button, BTN_A) &&
+        } else if (((CHECK_BTN_ALL(sControlInput->press.button, BTN_A) &&
+                     !(interactedActor->id == ACTOR_EN_BOX && VrChest_AwardActive())) ||
+                    (interactedActor->id == ACTOR_EN_BOX && VrChest_OpenRequested((EnBox*)interactedActor))) &&
                    !(this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) &&
                    !(this->stateFlags2 & PLAYER_STATE2_UNDERWATER)) {
             if (this->getItemId != GI_NONE) {
                 if (GameInteractor_Should(VB_OPEN_CHEST, true, interactedActor)) {
+                    s32 vrPhysicalChest =
+                        interactedActor->id == ACTOR_EN_BOX && VrChest_OpenRequested((EnBox*)interactedActor);
                     GetItemEntry giEntry;
                     if (this->getItemEntry.objectId == OBJECT_INVALID) {
                         giEntry = ItemTable_Retrieve(-this->getItemId);
@@ -8090,7 +8159,20 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
                         }
                     }
 
-                    if (GameInteractor_Should(VB_GIVE_ITEM_FROM_CHEST, true, chest)) {
+                    s32 giveChestItem = GameInteractor_Should(VB_GIVE_ITEM_FROM_CHEST, true, chest);
+                    if (vrPhysicalChest) {
+                        // The physical lid already supplied the animation and presentation. Run
+                        // the exact stock reward/message state machine alongside Link's current
+                        // action instead of replacing locomotion with the get-item cutscene.
+                        VrChest_ConsumeOpenRequest(chest);
+                        func_8083AE40(this, giEntry.objectId);
+                        if (giveChestItem) {
+                            Player_VrChestStartAward(play, this, chest, &giEntry);
+                        }
+                        return 1;
+                    }
+
+                    if (giveChestItem) {
                         Player_SetupWaitForPutAway(play, this, func_8083A434);
                     }
                     this->stateFlags1 |=
@@ -8515,6 +8597,9 @@ void func_8084BEE4(Player* this);
 // (func_8083F360) holds him at ageProperties->unk_3C (15); here the arms set it. < 0 = not climbing
 // by hand.
 static f32 sVrClimbWallDist = -1.0f;
+// +1 when Link holds the authored front of the polygon, -1 when a two-sided/dynamic climbable is
+// approached from its back. All physical-climb plane math uses an effective normal toward Link.
+static f32 sVrClimbWallSide = 1.0f;
 // How far toward the wall the view was last allowed to run ahead of the body between ticks
 // (Player_VrClimbPublishLimits). < 0 = no limit published yet: the view follows the hand fully.
 static f32 sVrClimbViewIn = -1.0f;
@@ -8527,9 +8612,9 @@ static s32 Player_VrClimbWallNormal(Player* this, f32 n[3]) {
     if (poly == NULL) {
         return false;
     }
-    n[0] = COLPOLY_GET_NORMAL(poly->normal.x);
+    n[0] = COLPOLY_GET_NORMAL(poly->normal.x) * sVrClimbWallSide;
     n[1] = 0.0f;
-    n[2] = COLPOLY_GET_NORMAL(poly->normal.z);
+    n[2] = COLPOLY_GET_NORMAL(poly->normal.z) * sVrClimbWallSide;
     len = sqrtf(SQ(n[0]) + SQ(n[2]));
     if (len < 0.001f) {
         return false;
@@ -8546,8 +8631,9 @@ static f32 Player_VrClimbPlaneDist(Player* this, f32 x, f32 y, f32 z) {
     if (poly == NULL) {
         return 0.0f;
     }
-    return (COLPOLY_GET_NORMAL(poly->normal.x) * x) + (COLPOLY_GET_NORMAL(poly->normal.y) * y) +
-           (COLPOLY_GET_NORMAL(poly->normal.z) * z) + poly->dist;
+    return ((COLPOLY_GET_NORMAL(poly->normal.x) * x) + (COLPOLY_GET_NORMAL(poly->normal.y) * y) +
+            (COLPOLY_GET_NORMAL(poly->normal.z) * z) + poly->dist) *
+           sVrClimbWallSide;
 }
 
 static f32 Player_VrClimbBodyDist(Player* this) {
@@ -8582,6 +8668,58 @@ static s32 Player_VrClimbGlue(PlayState* play, Player* this, f32 dist) {
     s16 shapeYaw = this->actor.shape.rot.y;
     s16 yaw = this->yaw;
     u32 wallFlags = sTouchedWallFlags;
+
+    if (sVrClimbWallSide < 0.0f) {
+        CollisionPoly* poly;
+        s32 hitBgId;
+        Vec3f start;
+        Vec3f end;
+        Vec3f hit;
+        f32 outward[3];
+        f32 len;
+
+        if (!Player_VrClimbWallNormal(this, outward)) {
+            return false;
+        }
+        // Search from just behind Link toward the wall. Back-side climbables must be tested as
+        // two-sided: their authored front face points through the wall, away from the player.
+        start.x = this->actor.world.pos.x + outward[0] * 20.0f;
+        start.y = this->actor.world.pos.y + 26.0f;
+        start.z = this->actor.world.pos.z + outward[2] * 20.0f;
+        end.x = this->actor.world.pos.x - outward[0] * (dist + 35.0f);
+        end.y = start.y;
+        end.z = this->actor.world.pos.z - outward[2] * (dist + 35.0f);
+        if (BgCheck_EntityLineTest1(&play->colCtx, &start, &end, &hit, &poly, true, false, false, false,
+                                    &hitBgId)) {
+            s32 flags = func_80041DB8(&play->colCtx, poly, hitBgId);
+            if ((flags & 8) || (flags & 2) || func_80041E4C(&play->colCtx, poly, hitBgId)) {
+                this->actor.wallPoly = poly;
+                this->actor.wallBgId = hitBgId;
+                this->actor.bgCheckFlags |= 0x200;
+                sTouchedWallFlags = flags;
+                outward[0] = -COLPOLY_GET_NORMAL(poly->normal.x);
+                outward[2] = -COLPOLY_GET_NORMAL(poly->normal.z);
+                len = sqrtf(SQ(outward[0]) + SQ(outward[2]));
+                if (len > 0.001f) {
+                    outward[0] /= len;
+                    outward[2] /= len;
+                    this->actor.wallYaw = Math_Atan2S(outward[2], outward[0]);
+                    this->actor.shape.rot.y = this->yaw = this->actor.wallYaw + 0x8000;
+                    this->actor.world.pos.x = hit.x + outward[0] * dist;
+                    this->actor.world.pos.z = hit.z + outward[2] * dist;
+                    return true;
+                }
+            }
+        }
+        this->actor.world.pos = pos;
+        this->actor.wallPoly = wallPoly;
+        this->actor.wallBgId = wallBgId;
+        this->actor.wallYaw = wallYaw;
+        this->actor.shape.rot.y = shapeYaw;
+        this->yaw = yaw;
+        sTouchedWallFlags = wallFlags;
+        return false;
+    }
 
     if (func_8083F360(play, this, 26.0f, dist, dist + 35.0f, -20.0f) &&
         ((sTouchedWallFlags & 8) || (sTouchedWallFlags & 2) ||
@@ -8641,9 +8779,15 @@ static void Player_VrClimbMount(PlayState* play, Player* this, VrClimbHit* hit) 
     f32 headFwd = CVarGetFloat("gVrHeadOffsetForward", 0.0f);
     f32 headSide = CVarGetFloat("gVrHeadOffsetSide", 0.0f);
 
+    sVrClimbWallSide = (((COLPOLY_GET_NORMAL(poly->normal.x) * this->actor.world.pos.x) +
+                         (COLPOLY_GET_NORMAL(poly->normal.y) * this->actor.world.pos.y) +
+                         (COLPOLY_GET_NORMAL(poly->normal.z) * this->actor.world.pos.z) + poly->dist) < 0.0f)
+                            ? -1.0f
+                            : 1.0f;
     this->actor.wallPoly = poly;
     this->actor.wallBgId = hit->bgId;
-    this->actor.wallYaw = Math_Atan2S(poly->normal.z, poly->normal.x);
+    this->actor.wallYaw = Math_Atan2S(poly->normal.z * sVrClimbWallSide,
+                                     poly->normal.x * sVrClimbWallSide);
     this->actor.bgCheckFlags |= BGCHECKFLAG_PLAYER_WALL_INTERACT;
     sTouchedWallFlags = wallFlags;
 
@@ -8713,6 +8857,10 @@ static void Player_VrClimbPlaceFromAbove(PlayState* play, Player* this, Collisio
     this->stateFlags1 &= ~(PLAYER_STATE1_IN_WATER | PLAYER_STATE1_HANGING_OFF_LEDGE);
     this->av1.actionVar1 = (wallFlags & 8) ? 2 : 0;
     this->av2.actionVar2 = 0;
+    sVrClimbWallSide = ((COLPOLY_GET_NORMAL(poly->normal.x) * outX) +
+                        (COLPOLY_GET_NORMAL(poly->normal.z) * outZ)) < 0.0f
+                           ? -1.0f
+                           : 1.0f;
     this->actor.wallPoly = poly;
     this->actor.wallBgId = bgId;
     this->actor.wallYaw = Math_Atan2S(outZ, outX);
@@ -13968,6 +14116,10 @@ void Player_Update(Actor* thisx, PlayState* play) {
         Player_UpdateCommon(this, play, &sp44);
     }
 
+    // A physically opened chest keeps the normal player action alive. Its get-item transaction
+    // advances here independently, so the textbox/fanfare does not freeze locomotion.
+    Player_VrChestAwardUpdate(play, this);
+
     MREG(52) = this->actor.world.pos.x;
     MREG(53) = this->actor.world.pos.y;
     MREG(54) = this->actor.world.pos.z;
@@ -14205,9 +14357,14 @@ void Player_Draw(Actor* thisx, PlayState* play2) {
         func_8002EBCC(&this->actor, play, 0);
         func_8002ED80(&this->actor, play, 0);
 
-        if (VR_IsInitialized() && VR_GetFirstPerson()) {
+        if ((this == GET_PLAYER(play)) && VR_IsInitialized() && (VR_GetFirstPerson() || VrArchery_Covers(this))) {
             // SOH [VR] The camera sits at Link's head, so draw the full body but cull the head +
             // hat (the game's projected-Z test uses the third-person matrix and doesn't apply).
+            // Physical shooting galleries keep their fixed camera, but still need this override
+            // so the visible slingshot/bow and its pouch share the controller-space grab anchor.
+            // Anchor dummy players deliberately stay on the normal full-body renderer: local
+            // Hide Link Body and first-person head culling are comfort settings for this player,
+            // never visibility instructions sent to other clients.
             overrideLimbDraw = Player_OverrideLimbDrawGameplayVRFirstPerson;
         } else if (this->unk_6AD != 0) {
             Vec3f projectedHeadPos;
@@ -15888,6 +16045,50 @@ s32 func_8084DFF4(PlayState* play, Player* this) {
     }
 
     return 0;
+}
+
+// The stock reward processor stores its phase in the active Player action. Physical chests must
+// not replace that action, so preserve the locomotion action's variable and lend the processor a
+// dedicated phase only for the duration of this call. This deliberately reuses func_8084DFF4 in
+// full, retaining randomizer delivery, pending flags, equip prompts, ice traps, special messages,
+// and fanfare behavior without duplicating any of those rules.
+static s32 sVrChestAwardPhase = -1;
+static EnBox* sVrChestAwardChest = NULL;
+
+void Player_VrChestStartAward(PlayState* play, Player* this, EnBox* chest, GetItemEntry* entry) {
+    if (play == NULL || this == NULL || chest == NULL || entry == NULL) {
+        return;
+    }
+
+    sVrChestAwardPhase = 0;
+    sVrChestAwardChest = chest;
+    this->getItemEntry = *entry;
+    this->getItemId = ABS(entry->getItemId);
+    this->getItemEntry.getItemId = ABS(this->getItemEntry.getItemId);
+    this->unk_862 = 0; // VrChest_DrawItem remains the only visible copy.
+    VrChest_AwardStarted(chest, entry);
+}
+
+void Player_VrChestAwardUpdate(PlayState* play, Player* this) {
+    s32 savedActionVar;
+    s32 finished;
+
+    if (sVrChestAwardPhase < 0 || play == NULL || this == NULL) {
+        return;
+    }
+
+    savedActionVar = this->av1.actionVar1;
+    this->av1.actionVar1 = sVrChestAwardPhase;
+    finished = func_8084DFF4(play, this);
+    sVrChestAwardPhase = this->av1.actionVar1;
+    this->av1.actionVar1 = savedActionVar;
+
+    if (finished) {
+        VrChest_AwardFinished(sVrChestAwardChest);
+        sVrChestAwardChest = NULL;
+        sVrChestAwardPhase = -1;
+        this->unk_862 = 0;
+    }
 }
 
 void Player_Action_8084E1EC(Player* this, PlayState* play) {

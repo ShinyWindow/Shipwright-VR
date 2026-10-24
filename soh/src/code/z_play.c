@@ -38,6 +38,10 @@ Input* D_8012D1F8 = NULL;
 PlayState* gPlayState;
 s16 firstInit = 0;
 
+// Scene setup completes before the Player actor has a usable entrance yaw. Latch the request here
+// and consume it from the first valid first-person draw, where Link's final spawn facing is known.
+static bool sVrSceneHeadingPending = false;
+
 void Play_SpawnScene(PlayState* play, s32 sceneId, s32 spawn);
 
 // This macro prints the number "1" with a file and line number if R_ENABLE_PLAY_LOGS is enabled.
@@ -1415,13 +1419,18 @@ void Play_Draw(PlayState* play) {
             // animated head bone (actor.focus.pos) which carries the up/down bob and sway. The body
             // mesh still animates visually; the camera stays smooth (VR comfort: no uninitiated
             // vertical motion). Tune eye height with gVrHeadHeightOffset.
-            // Heading recenter: capture the HMD->world yaw offset when first-person turns on, and
-            // whenever the player requests a manual recenter (set gVrRecenterHeading 1 in console).
+            // Heading alignment runs when first-person turns on, after a scene spawn, or whenever
+            // the player requests a manual recenter (set gVrRecenterHeading 1 in console).
             // Also re-zero roomscale here so the player's current physical position maps to Link's
             // current body — must run before we read the roomscale origin for the anchor below.
-            if (!sVrFirstPersonWasActive || CVarGetInteger("gVrRecenterHeading", 0)) {
+            if (!sVrFirstPersonWasActive || sVrSceneHeadingPending ||
+                CVarGetInteger("gVrRecenterHeading", 0)) {
                 VR_RecenterHeading(vrPlayer->actor.shape.rot.y);
+                // Rotate the world about the physical head so forward matches the entrance yaw.
+                // This is one-shot; ordinary HMD free look remains untouched afterward.
+                VR_RequestFaceYaw(vrPlayer->actor.shape.rot.y);
                 VR_ResetRoomscale();
+                sVrSceneHeadingPending = false;
                 CVarSetInteger("gVrRecenterHeading", 0);
             }
             sVrFirstPersonWasActive = true;
@@ -2041,6 +2050,9 @@ void Play_SpawnScene(PlayState* play, s32 sceneId, s32 spawn) {
         CVarClear(CVAR_GENERAL("BetterDebugWarpScreenMQModeScene"));
     }
 
+    // VR may remain first-person throughout loading, so explicitly arm a heading correction for
+    // the first frame after the new Player receives this spawn's entrance rotation.
+    sVrSceneHeadingPending = true;
     OTRPlay_SpawnScene(play, sceneId, spawn);
 }
 

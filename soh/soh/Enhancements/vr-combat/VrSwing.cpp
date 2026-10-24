@@ -1071,6 +1071,8 @@ VrBladeSample sHammerPath[16];
 int sHammerPathCount = 0;
 float sHammerLastVel[3] = { 0.0f, 0.0f, 0.0f }; // newest sample of the previous snapshot
 int sPoundCooldown = 0;
+Vec3f sHammerFloorProbe = {};
+bool sHammerFloorProbeValid = false;
 
 inline Vec3f ModelPt(float x, float y, float z) {
     Vec3f m = { x, y, z };
@@ -1154,6 +1156,13 @@ void FeedHammer(PlayState* play, Player* player) {
     const float headR = vdist(headC0, headOut0);
     const Vec3f rimOff = vsub(headOut0, headC0); // world: along the handle, head radius long
     const Vec3f axisDir = vnorm(vsub(headHi0, headLo0));
+
+    // Lowest point of the visible/colliding drum. The player update uses last draw's live pose for
+    // the optional floor-only reach assist; keeping this separate from the physics capsule means
+    // the hammer remains exact against walls, enemies and props.
+    sHammerFloorProbe = headLo0.y < headHi0.y ? headLo0 : headHi0;
+    sHammerFloorProbe.y -= headR;
+    sHammerFloorProbeValid = true;
 
     float effPosArr[3];
     float effQuatArr[4];
@@ -1422,6 +1431,56 @@ void HammerContact(PlayState* play, Player* player, const VrContactEvent& ev) {
         Player_PlaySfx(&player->actor, NA_SE_IT_WALL_HIT_SOFT);
     }
     VrCombat::Hammer_NoteImpact(approach, result, strike);
+}
+
+// Accessibility/reach assist for players whose standing arm span cannot put the visible hammer on
+// Link's floor. This deliberately synthesizes only a ground pound: it never enlarges the hammer's
+// wall, enemy, or object collider, and still requires the normal downward pound velocity.
+void HammerFloorReachAssist(PlayState* play, Player* player) {
+    const float reachCm = CVarGetFloat("gVrHammerPoundReach", 15.0f);
+    if (!sHammerFloorProbeValid || reachCm <= 0.0f || sPoundCooldown != 0 || sHammerPathCount == 0) {
+        return;
+    }
+
+    float downwardMps = 0.0f;
+    for (int i = 0; i < sHammerPathCount; i++) {
+        downwardMps = fmaxf(downwardMps, -sHammerPath[i].midVelMps[1]);
+    }
+    const float poundSpeed = CVarGetFloat("gVrHammerPoundSpeed", 2.5f);
+    if (downwardMps < poundSpeed) {
+        return;
+    }
+
+    CollisionPoly* floorPoly = NULL;
+    s32 floorBgId = BGCHECK_SCENE;
+    Vec3f rayPos = sHammerFloorProbe;
+    const float floorY = BgCheck_EntityRaycastFloor3(&play->colCtx, &floorPoly, &floorBgId, &rayPos);
+    if (floorY <= BGCHECK_Y_MIN || floorPoly == NULL || COLPOLY_GET_NORMAL(floorPoly->normal.y) <
+                                                        CVarGetFloat("gVrHammerFloorNormal", 0.6f)) {
+        return;
+    }
+
+    float worldScale = VR_GetWorldScale();
+    if (worldScale < 1.0f) {
+        worldScale = 35.0f;
+    }
+    const float gap = sHammerFloorProbe.y - floorY;
+    const float reachUnits = reachCm * 0.01f * worldScale;
+    if (gap < 0.0f || gap > reachUnits) {
+        return;
+    }
+
+    const float impact[3] = { sHammerFloorProbe.x, floorY, sHammerFloorProbe.z };
+    Player_VrHammerImpact(play, player, impact, 1);
+    sPoundCooldown = 8;
+    const VrCombat::HammerGrip& grip = VrCombat::Hammer_GetGrip();
+    float amp = fminf(0.7f + 0.06f * downwardMps, 1.0f);
+    float ms = fminf(70.0f + 15.0f * downwardMps, 180.0f);
+    VR_TriggerHaptic(SwordHand(), amp, 0.0f, ms);
+    if (grip.twoHand && grip.offHand >= 0) {
+        VR_TriggerHaptic(grip.offHand, amp, 0.0f, ms);
+    }
+    VrCombat::Hammer_NoteImpact(downwardMps, 1, 0);
 }
 
 } // namespace
@@ -1848,11 +1907,15 @@ void Swing_OnPlayerUpdate(PlayState* play, Player* player) {
         sHammerPathCount = VR_PhysGetBladePath(VR_PHYS_SLOT_WEAPON, sHammerPath, 16);
     } else {
         sHammerPathCount = 0;
+        sHammerFloorProbeValid = false;
     }
     if (sPoundCooldown > 0) {
         sPoundCooldown--;
     }
     VrCombat::Hammer_Tick(play, player);
+    if (hammer) {
+        HammerFloorReachAssist(play, player);
+    }
 
     // Contact events from the sim: impact SFX + sparks at the contact point (the matching
     // haptics already fired VR-side with zero latency).

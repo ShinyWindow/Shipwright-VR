@@ -6,6 +6,7 @@
 
 #include "z_arrow_fire.h"
 #include "overlays/actors/ovl_En_Arrow/z_en_arrow.h"
+#include "soh/Enhancements/vr-combat/VrCombat.h"
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_UPDATE_DURING_OCARINA)
 
@@ -216,6 +217,12 @@ void ArrowFire_Draw(Actor* thisx, PlayState* play2) {
         Matrix_RotateX(tranform->shape.rot.x * (M_PI / 0x8000), MTXMODE_APPLY);
         Matrix_RotateZ(tranform->shape.rot.z * (M_PI / 0x8000), MTXMODE_APPLY);
         Matrix_Scale(0.01f, 0.01f, 0.01f, MTXMODE_APPLY);
+        if (VrArchery_NockedArrowHandForActor(&arrow->actor) >= 0) {
+            f32 vrScale = VrHand_ScaleFactor();
+            Matrix_Translate(-1.0f, 0.0f, -1003.0f, MTXMODE_APPLY);
+            Matrix_Scale(vrScale, vrScale, vrScale, MTXMODE_APPLY);
+            Matrix_Translate(1.0f, 0.0f, 1003.0f, MTXMODE_APPLY);
+        }
 
         // Draw red effect over the screen when arrow hits
         if (this->unk_15C > 0) {
@@ -240,7 +247,11 @@ void ArrowFire_Draw(Actor* thisx, PlayState* play2) {
         }
         Matrix_Scale(this->radius * 0.2f, this->unk_158 * 4.0f, this->radius * 0.2f, MTXMODE_APPLY);
         Matrix_Translate(0.0f, -700.0f, 0.0f, MTXMODE_APPLY);
+        s32 vrWeldHand = VrArchery_NockedArrowHandForActor(&arrow->actor);
+        s32 previousWeldHand = gVrMtxWeldHand;
+        gVrMtxWeldHand = vrWeldHand;
         gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        gVrMtxWeldHand = previousWeldHand;
         gSPDisplayList(POLY_XLU_DISP++, sMaterialDL);
         gSPDisplayList(POLY_XLU_DISP++, Gfx_TwoTexScrollEx(play->state.gfxCtx, 0, 255 - (stateFrames * 2) % 256, 0, 64,
                                                            32, 1, 255 - stateFrames % 256,
